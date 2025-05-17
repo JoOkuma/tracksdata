@@ -13,12 +13,17 @@ class BaseSolver(abc.ABC):
     """
 
     @abc.abstractmethod
-    def __call__(self, graph: BaseGraphBackend, solution_key: str = DEFAULT_SOLUTION_KEY) -> None:
+    def __call__(
+        self, graph: BaseGraphBackend, solution_key: str = DEFAULT_SOLUTION_KEY
+    ) -> None:
         """
-        Solve the tracking problem and add the result to the graph with key `solution_key`.
+        Solve the tracking problem and add the result to the graph with
+        key `solution_key`.
 
         Parameters
         ----------
+        graph : BaseGraphBackend
+            The graph to solve the tracking problem on.
         solution_key: str
             The edge and node attributes key to add the solution to.
         """

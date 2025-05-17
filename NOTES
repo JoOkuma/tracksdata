@@ -1,0 +1,16 @@
+
+- add optional node id provided by the user
+- add label id key to regionprops operator
+- add somekind of type checking or recording when adding attributes on database
+- add attribute class for nodes:
+    - this class would have default attributes
+    - and support arbitrary attributes
+
+    class NodeAttr:
+        t = "t"
+        segm_id: int = 0
+        spatial_columns = ["x", "y", "z"]
+
+    class RegionPropsOperator(BaseNodesOperator):
+
+        node_attr = NodeAttr()
