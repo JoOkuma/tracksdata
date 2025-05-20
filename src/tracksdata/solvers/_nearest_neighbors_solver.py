@@ -122,8 +122,8 @@ class NearestNeighborsSolver(BaseSolver):
 
         graph.add_edge_feature_key(self.solution_key, False)
         graph.update_edge_features(
-            solution_edges_df[DEFAULT_ATTR_KEYS.EDGE_ID].to_numpy(),
-            {self.solution_key: True},
+            edge_ids=solution_edges_df[DEFAULT_ATTR_KEYS.EDGE_ID].to_numpy(),
+            attributes={self.solution_key: True},
         )
 
         node_ids = np.unique(
@@ -137,6 +137,6 @@ class NearestNeighborsSolver(BaseSolver):
 
         graph.add_node_feature_key(self.solution_key, False)
         graph.update_node_features(
-            node_ids,
-            {self.solution_key: True},
+            node_ids=node_ids,
+            attributes={self.solution_key: True},
         )

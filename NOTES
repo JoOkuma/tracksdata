@@ -1,4 +1,7 @@
 
+- is remapping nodes a cost that's too high to afford?
+
+
 - add optional node id provided by the user
 - add label id key to regionprops operator
 - add somekind of type checking or recording when adding attributes on database

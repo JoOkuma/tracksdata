@@ -6,7 +6,12 @@ import polars as pl
 import rustworkx as rx
 
 from tracksdata.constants import DEFAULT_ATTR_KEYS
-from tracksdata.graph._base_graph import BaseGraphBackend, BaseReadOnlyGraph
+from tracksdata.graph._base_graph import (
+    BaseGraphBackend,
+    BaseReadOnlyGraph,
+    remap_input_node_ids,
+    remap_output_node_ids,
+)
 
 # TODO:
 # - use a better name for the default graph backend
@@ -31,11 +36,13 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         """
         TODO
         """
+        super().__init__()
         self._graph = rx.PyDiGraph()
         self._time_to_nodes: dict[int, list[int]] = {}
         self._node_features_keys: list[str] = [DEFAULT_ATTR_KEYS.T]
         self._edge_features_keys: list[str] = []
 
+    @remap_output_node_ids()
     def add_node(
         self,
         attributes: dict[str, Any],
@@ -98,10 +105,11 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         edge_id = self._graph.add_edge(source_id, target_id, attributes)
         return edge_id
 
+    @remap_output_node_ids()
     def filter_nodes_by_attribute(
         self,
         attributes: dict[str, Any],
-    ) -> list[int]:
+    ) -> np.ndarray:
         """
         Filter nodes by attributes.
 
@@ -113,7 +121,7 @@ class RustWorkXGraphBackend(BaseGraphBackend):
 
         Returns
         -------
-        list[int]
+        np.ndarray
             The IDs of the filtered nodes.
         """
         rx_graph = self._graph
@@ -141,14 +149,17 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         else:
             return node_map[rx_graph.filter_nodes(_filter_func)].tolist()
 
-    def node_ids(self) -> list[int]:
+    @remap_output_node_ids()
+    def node_ids(self) -> np.ndarray:
         """
         Get the IDs of all nodes in the graph.
         """
-        return list(self._graph.node_indices())
+        return np.asarray(list(self._graph.node_indices()), dtype=int)
 
+    @remap_input_node_ids("node_ids")
     def subgraph(
         self,
+        *,
         node_ids: Sequence[int],
     ) -> "RustWorkXGraphBackend":
         """
@@ -167,8 +178,6 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         RustWorkXGraphBackend
             A new graph with the specified nodes.
         """
-        raise NotImplementedError("FIXME: need to fix the node IDs")
-
         subgraph = RustWorkXGraphBackend()
         subgraph._graph = self._graph.subgraph(node_ids)
         subgraph._node_features_keys = self._node_features_keys
@@ -239,8 +248,10 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         for _, _, edge_attr in self._graph.weighted_edge_list():
             edge_attr[key] = default_value
 
+    @remap_input_node_ids("node_ids")
     def node_features(
         self,
+        *,
         node_ids: Sequence[int] | None = None,
         feature_keys: Sequence[str] | str | None = None,
     ) -> pl.DataFrame:
@@ -289,8 +300,14 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         # Create DataFrame and set node_id as index in one shot
         return pl.DataFrame(columns)
 
+    # TODO: remap edge ids to match nodes
+    @remap_input_node_ids("node_ids")
+    @remap_output_node_ids(
+        [DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET]
+    )
     def edge_features(
         self,
+        *,
         node_ids: list[int] | None = None,
         feature_keys: Sequence[str] | None = None,
     ) -> pl.DataFrame:
@@ -362,8 +379,10 @@ class RustWorkXGraphBackend(BaseGraphBackend):
         """
         return self._graph.num_nodes()
 
+    @remap_input_node_ids("node_ids")
     def update_node_features(
         self,
+        *,
         node_ids: Sequence[int],
         attributes: dict[str, Any],
     ) -> None:
@@ -399,6 +418,7 @@ class RustWorkXGraphBackend(BaseGraphBackend):
 
     def update_edge_features(
         self,
+        *,
         edge_ids: Sequence[int],
         attributes: dict[str, Any],
     ) -> None:

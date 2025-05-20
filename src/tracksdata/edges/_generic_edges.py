@@ -119,5 +119,6 @@ class GenericFunctionEdgesOperator:
             graph.add_edge_feature_key(self.output_key, -1.0)
 
         graph.update_edge_features(
-            edges_df[DEFAULT_ATTR_KEYS.EDGE_ID].to_numpy(), {self.output_key: weights}
+            edge_ids=edges_df[DEFAULT_ATTR_KEYS.EDGE_ID].to_numpy(),
+            attributes={self.output_key: weights},
         )
