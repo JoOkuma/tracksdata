@@ -3,9 +3,9 @@ from typing import Any
 
 import numpy as np
 
-from tracksdata.attrs import NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.edges._base_edge_attrs import BaseEdgeAttrsOperator
+from tracksdata.expr import NodeAttr
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.utils._logging import LOG
 

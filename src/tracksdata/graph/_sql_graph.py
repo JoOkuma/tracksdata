@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, Query, Session, load_only
 from sqlalchemy.sql.type_api import TypeEngine
 
-from tracksdata.attrs import AttrComparison, split_attr_comps
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import AttrComparison, split_attr_comps
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.utils._dataframe import unpack_array_attrs
 from tracksdata.utils._logging import LOG

@@ -4,8 +4,8 @@ from typing import Any
 import polars as pl
 import rustworkx as rx
 
-from tracksdata.attrs import AttrComparison
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import AttrComparison
 from tracksdata.functional._rx import graph_track_ids
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.graph._rustworkx_graph import RustWorkXGraph

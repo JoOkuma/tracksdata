@@ -4,8 +4,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import EdgeAttr, NodeAttr
 from tracksdata.graph import SQLGraph
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.nodes._mask import Mask

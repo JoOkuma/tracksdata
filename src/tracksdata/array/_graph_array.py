@@ -2,8 +2,8 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from tracksdata.array._base_array import ArrayIndex, BaseReadOnlyArray
-from tracksdata.attrs import NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import NodeAttr
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.nodes._mask import Mask
 from tracksdata.utils._dtypes import polars_dtype_to_numpy_dtype

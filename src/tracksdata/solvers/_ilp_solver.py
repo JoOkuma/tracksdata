@@ -11,9 +11,8 @@ from ilpy import (
     VariableType,
 )
 
-from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
-from tracksdata.expr import AttrExpr, ExprInput
+from tracksdata.expr import AttrExpr, EdgeAttr, ExprInput, NodeAttr
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.graph._graph_view import GraphView
 from tracksdata.solvers._base_solver import BaseSolver

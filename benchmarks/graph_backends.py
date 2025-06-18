@@ -5,10 +5,9 @@ from pathlib import Path
 import polars as pl
 from tabulate import tabulate
 
-from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.edges import DistanceEdges
-from tracksdata.expr import AttrExpr
+from tracksdata.expr import AttrExpr, EdgeAttr, NodeAttr
 from tracksdata.graph import RustWorkXGraph, SQLGraph
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.nodes import RandomNodes

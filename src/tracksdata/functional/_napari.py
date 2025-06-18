@@ -1,8 +1,8 @@
 import polars as pl
 
 from tracksdata.array._graph_array import GraphArrayView
-from tracksdata.attrs import EdgeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import EdgeAttr
 from tracksdata.graph._base_graph import BaseGraph
 
 

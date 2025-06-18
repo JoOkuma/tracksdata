@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 import polars as pl
 
-from tracksdata.attrs import AttrComparison
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import AttrComparison
 from tracksdata.utils._logging import LOG
 
 if TYPE_CHECKING:

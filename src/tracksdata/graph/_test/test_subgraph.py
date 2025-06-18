@@ -4,8 +4,8 @@ from collections.abc import Callable
 import polars as pl
 import pytest
 
-from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import EdgeAttr, NodeAttr
 from tracksdata.graph import GraphView
 from tracksdata.graph._base_graph import BaseGraph
 

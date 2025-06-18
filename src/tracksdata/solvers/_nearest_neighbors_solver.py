@@ -1,9 +1,8 @@
 import numpy as np
 from numba import njit, typed
 
-from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
-from tracksdata.expr import AttrExpr, ExprInput
+from tracksdata.expr import EdgeAttr, ExprInput, NodeAttr
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.graph._graph_view import GraphView
 from tracksdata.solvers._base_solver import BaseSolver
@@ -52,15 +51,15 @@ class NearestNeighborsSolver(BaseSolver):
     ----------
     max_children : int
         The maximum number of children a node can have.
-    edge_weight : str | AttrExpr
+    edge_weight : str | EdgeAttr
         Key to get the edge weight from the graph or an expression to evaluate
         composing edge attributes of the graph.
 
         For example:
-        >>> `edge_weight=-AttrExpr("iou")`
+        >>> `edge_weight=-EdgeAttr("iou")`
         will use the negative IoU as edge weight.
 
-        >>> `edge_weight=AttrExpr("iou").log() * AttrExpr("weight")`
+        >>> `edge_weight=EdgeAttr("iou").log() * EdgeAttr("weight")`
         will use the log of IoU times the default weight as edge weight.
 
     output_key : str
@@ -83,7 +82,7 @@ class NearestNeighborsSolver(BaseSolver):
             return_solution=return_solution,
         )
         self.max_children = max_children
-        self.edge_weight_expr = AttrExpr(edge_weight)
+        self.edge_weight_expr = EdgeAttr(edge_weight)
 
     def solve(
         self,

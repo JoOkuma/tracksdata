@@ -6,13 +6,14 @@ import numpy as np
 import polars as pl
 import rustworkx as rx
 
-from tracksdata.attrs import (
+from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.expr import (
     AttrComparison,
+    as_attr_comparison_list,
     attr_comps_to_strs,
     polars_reduce_attr_comps,
     split_attr_comps,
 )
-from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.functional._rx import graph_track_ids
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.utils._dataframe import unpack_array_attrs
@@ -277,6 +278,7 @@ class RustWorkXGraph(BaseGraph):
         rx_graph = self.rx_graph
         node_map = None
         # entire graph
+        attrs = as_attr_comparison_list(attrs)
         attrs, time = _pop_time_eq(attrs)
 
         if time is not None:
