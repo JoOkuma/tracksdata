@@ -16,7 +16,7 @@ from tracksdata.solvers import NearestNeighborsSolver
 
 class SQLGraphWithMemory(SQLGraph):
     def __init__(self):
-        super().__init__(drivername="sqlite", database=":memory:")
+        super().__init__(drivername="sqlite", database=":memory:", overwrite=True)
 
 
 class SQLGraphDisk(SQLGraph):
@@ -24,7 +24,7 @@ class SQLGraphDisk(SQLGraph):
         import datetime
 
         path = f"/tmp/_benchmarks_tracksdata_db_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        super().__init__(drivername="sqlite", database=path)
+        super().__init__(drivername="sqlite", database=path, overwrite=True)
 
 
 def _run_benchmark(
