@@ -3,7 +3,6 @@ from collections.abc import Sequence
 import numpy as np
 from scipy.spatial import KDTree
 
-from tracksdata.attrs import NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.edges._base_edges import BaseEdgesOperator
 from tracksdata.graph._base_graph import BaseGraph
@@ -96,11 +95,9 @@ class DistanceEdges(BaseEdgesOperator):
         self.output_key = output_key
         self.attr_keys = attr_keys
 
-    def _add_edges_per_time(
+    def add_edges(
         self,
         graph: BaseGraph,
-        *,
-        t: int,
     ) -> None:
         """
         Add distance-based edges between nodes at consecutive time points.
@@ -129,54 +126,55 @@ class DistanceEdges(BaseEdgesOperator):
         else:
             attr_keys = self.attr_keys
 
-        prev_node_ids = graph.filter_nodes_by_attrs(NodeAttr(DEFAULT_ATTR_KEYS.T) == t - 1)
-        cur_node_ids = graph.filter_nodes_by_attrs(NodeAttr(DEFAULT_ATTR_KEYS.T) == t)
+        nodes_df = graph.node_attrs(
+            attr_keys=[DEFAULT_ATTR_KEYS.NODE_ID, DEFAULT_ATTR_KEYS.T, *attr_keys],
+            unpack=True,
+        ).sort(DEFAULT_ATTR_KEYS.T)
 
-        if len(prev_node_ids) == 0:
-            LOG.warning(
-                "No nodes found for time point %d",
-                t - 1,
-            )
-            return
+        df_by_time = {t: df for (t,), df in nodes_df.group_by(DEFAULT_ATTR_KEYS.T)}
 
-        if len(cur_node_ids) == 0:
-            LOG.warning(
-                "No nodes found for time point %d",
-                t,
-            )
-            return
+        for t in df_by_time.keys():
+            prev_df = df_by_time.get(t - 1)
+            cur_df = df_by_time[t]
 
-        prev_attrs = graph.node_attrs(node_ids=prev_node_ids, attr_keys=attr_keys)
-        cur_attrs = graph.node_attrs(node_ids=cur_node_ids, attr_keys=attr_keys)
-
-        prev_kdtree = KDTree(prev_attrs.to_numpy())
-
-        distances, prev_neigh_ids = prev_kdtree.query(
-            cur_attrs.to_numpy(),
-            k=self.n_neighbors,
-            distance_upper_bound=self.distance_threshold,
-        )
-        is_valid = ~np.isinf(distances)
-
-        prev_node_ids = np.asarray(prev_node_ids)
-        # kdtree return from 0 to n-1
-        # converting back to arbitrary indexing
-        prev_neigh_ids[is_valid] = prev_node_ids[prev_neigh_ids[is_valid]]
-
-        edges_data = []
-        for cur_id, neigh_ids, neigh_dist, neigh_valid in zip(
-            cur_node_ids, prev_neigh_ids, distances, is_valid, strict=True
-        ):
-            for neigh_id, dist in zip(neigh_ids[neigh_valid].tolist(), neigh_dist[neigh_valid].tolist(), strict=True):
-                edges_data.append(
-                    {
-                        "source_id": neigh_id,
-                        "target_id": cur_id,
-                        self.output_key: dist,
-                    }
+            if prev_df is None:
+                LOG.warning(
+                    "No nodes found for time point %d",
+                    t - 1,
                 )
+                continue
 
-        if len(edges_data) > 0:
-            graph.bulk_add_edges(edges_data)
-        else:
-            LOG.warning("No valid edges found for the pair of time point (%d, %d)", t, t - 1)
+            prev_kdtree = KDTree(prev_df.select(attr_keys).to_numpy())
+
+            distances, prev_neigh_ids = prev_kdtree.query(
+                cur_df.select(attr_keys).to_numpy(),
+                k=self.n_neighbors,
+                distance_upper_bound=self.distance_threshold,
+            )
+            is_valid = ~np.isinf(distances)
+
+            prev_node_ids = prev_df[DEFAULT_ATTR_KEYS.NODE_ID].to_numpy()
+            cur_node_ids = cur_df[DEFAULT_ATTR_KEYS.NODE_ID].to_numpy()
+            # kdtree return from 0 to n-1
+            # converting back to arbitrary indexing
+            prev_neigh_ids[is_valid] = prev_node_ids[prev_neigh_ids[is_valid]]
+
+            edges_data = []
+            for cur_id, neigh_ids, neigh_dist, neigh_valid in zip(
+                cur_node_ids, prev_neigh_ids, distances, is_valid, strict=True
+            ):
+                for neigh_id, dist in zip(
+                    neigh_ids[neigh_valid].tolist(), neigh_dist[neigh_valid].tolist(), strict=True
+                ):
+                    edges_data.append(
+                        {
+                            "source_id": neigh_id,
+                            "target_id": cur_id,
+                            self.output_key: dist,
+                        }
+                    )
+
+            if len(edges_data) > 0:
+                graph.bulk_add_edges(edges_data)
+            else:
+                LOG.warning("No valid edges found for the pair of time point (%d, %d)", t, t - 1)

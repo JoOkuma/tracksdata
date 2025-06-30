@@ -51,7 +51,7 @@ class BaseEdgesOperator(abc.ABC):
                 **kwargs,
             )
 
-    @abc.abstractmethod
+    # @abc.abstractmethod
     def _add_edges_per_time(
         self,
         graph: BaseGraph,
@@ -71,3 +71,4 @@ class BaseEdgesOperator(abc.ABC):
         **kwargs : Any
             Additional keyword arguments to pass to the `_add_edges_per_time` method.
         """
+        raise NotImplementedError("This method should be implemented by the subclass")
