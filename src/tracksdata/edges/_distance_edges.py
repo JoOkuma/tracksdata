@@ -123,3 +123,59 @@ class DistanceEdges(BaseEdgesOperator):
             graph.bulk_add_edges(edges_data)
         else:
             LOG.warning("No valid edges found for the pair of time point (%d, %d)", t, t - 1)
+
+
+class ExtendDistanceEdges(DistanceEdges):
+    """
+    Operator that extends the neighbors of a node to different time points
+    until it meets the `n_neighbors` condition or the maximum number of time points.
+    """
+
+    def __init__(
+        self,
+        distance_threshold: float,
+        n_neighbors: int,
+        max_time_points: int,
+        output_key: str = DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        show_progress: bool = True,
+    ):
+        super().__init__(
+            distance_threshold=distance_threshold,
+            n_neighbors=n_neighbors,
+            output_key=output_key,
+            show_progress=show_progress,
+        )
+        self.max_time_points = max_time_points
+        self._kdtrees = {}
+
+    def add_edges(self, graph: BaseGraph, *, t: int | None = None) -> None:
+        """
+        Add missing edges to a graph based and their current number of neighbors.
+
+        Parameters
+        ----------
+        graph : BaseGraph
+            The graph to add edges to.
+        t : int | None
+            The time point to add edges for.
+            If None, all time points are considered.
+        """
+        super().add_edges(graph, t=t)
+        self._kdtrees.clear()
+
+    def _add_edges_per_time(
+        self,
+        graph: BaseGraph,
+        *,
+        t: int,
+    ) -> None:
+        """
+        Add edges to a graph based on the distance between nodes.
+
+        Parameters
+        ----------
+        graph : BaseGraph
+            The graph to add edges to.
+        t : int
+            The time point to add edges for.
+        """
