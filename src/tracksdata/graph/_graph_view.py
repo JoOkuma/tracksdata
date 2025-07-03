@@ -203,7 +203,7 @@ class GraphView(RustWorkXGraph):
 
         See Also
         --------
-        [add_overlap][tracksdata.graph.BaseGraph.add_overlap]:
+        [add_overlap][tracksdata.graph.GraphView.add_overlap]:
             Add a single overlap to the graph.
         """
         self._root.bulk_add_overlaps(overlaps)
