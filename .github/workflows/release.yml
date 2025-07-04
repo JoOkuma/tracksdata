@@ -10,6 +10,11 @@ on:
         description: 'Version to release (e.g., v1.0.0)'
         required: true
         type: string
+      test_release:
+        description: 'Test release (skips PyPI publish)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -55,6 +60,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # Only run on main repo and not for test releases
+    if: github.repository == 'jookuma/tracksdata' && github.event.inputs.test_release != 'true'
     environment:
       name: pypi
       url: https://pypi.org/p/tracksdata
@@ -70,9 +77,33 @@ jobs:
         with:
           attestations: true
 
+  test-release:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only run for test releases or on forks
+    if: github.event.inputs.test_release == 'true' || github.repository != 'jookuma/tracksdata'
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Test PyPI upload (dry run)
+        run: |
+          echo "🧪 This would upload to PyPI:"
+          ls -la dist/
+          echo "Package contents:"
+          for file in dist/*; do
+            echo "📦 $file"
+          done
+          echo "✅ Test release completed successfully!"
+
   github-release:
     needs: build
     runs-on: ubuntu-latest
+    # Only create GitHub releases on main repo and not for test releases
+    if: github.repository == 'jookuma/tracksdata' && github.event.inputs.test_release != 'true'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
