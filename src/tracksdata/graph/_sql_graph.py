@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import rustworkx as rx
 import sqlalchemy as sa
-from sqlalchemy.orm import DeclarativeBase, Query, Session, load_only
+from sqlalchemy.orm import DeclarativeBase, Query, Session, aliased, load_only
 from sqlalchemy.sql.type_api import TypeEngine
 
 from tracksdata.attrs import AttrComparison, split_attr_comps
@@ -769,6 +769,7 @@ class SQLGraph(BaseGraph):
 
         with Session(self._engine) as session:
             node_query = session.query(self.Node)
+            edge_query = session.query(self.Edge)
 
             node_filtered = False
 
@@ -776,19 +777,28 @@ class SQLGraph(BaseGraph):
                 node_query = node_query.filter(self.Node.node_id.in_(node_ids))
                 node_filtered = True
 
+                edge_query = edge_query.filter(
+                    self.Edge.source_id.in_(node_ids),
+                    self.Edge.target_id.in_(node_ids),
+                )
+
             if node_attr_comps:
                 node_query = _filter_query(node_query, self.Node, node_attr_comps)
                 node_ids = [i for (i,) in node_query.with_entities(self.Node.node_id).all()]
                 node_filtered = True
 
-            # selecting edges
-            edge_query = session.query(self.Edge)
+                SourceNode = aliased(self.Node)
+                TargetNode = aliased(self.Node)
 
-            if node_ids is not None:
-                edge_query = edge_query.filter(
-                    self.Edge.source_id.in_(node_ids),
-                    self.Edge.target_id.in_(node_ids),
+                edge_query = edge_query.join(
+                    SourceNode,
+                    self.Edge.source_id == SourceNode.node_id,
+                ).join(
+                    TargetNode,
+                    self.Edge.target_id == TargetNode.node_id,
                 )
+                edge_query = _filter_query(edge_query, SourceNode, node_attr_comps)
+                edge_query = _filter_query(edge_query, TargetNode, node_attr_comps)
 
             if edge_attr_comps:
                 edge_query = _filter_query(edge_query, self.Edge, edge_attr_comps)
