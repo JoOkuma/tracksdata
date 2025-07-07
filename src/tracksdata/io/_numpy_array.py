@@ -112,7 +112,7 @@ def load_array(
     add_mask = True
     if np.isscalar(radius):
         if radius == 0:
-            graph.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
+            add_mask = False
 
         # we still broadcast even if we don't add masks to make logic easier
         radius = np.broadcast_to(radius, (positions.shape[0],))
