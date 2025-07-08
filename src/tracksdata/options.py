@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+__all__ = ["Options", "get_options", "options_context", "set_options"]
+
 # Module-private mutable state
 _options_stack: list["Options"] = []
 

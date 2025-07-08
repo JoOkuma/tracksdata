@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import cloudpickle
 import numpy as np
 import polars as pl
 import rustworkx as rx
@@ -240,6 +241,18 @@ class SQLGraph(BaseGraph):
         for col in self._boolean_columns[table_class.__tablename__]:
             if col in df.columns:
                 df = df.with_columns(pl.col(col).cast(pl.Boolean))
+        return df
+
+    def _unpickle_bytes_columns(
+        self,
+        df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """
+        Unpickle bytes columns from the database.
+        """
+        for col in df.columns:
+            if df[col].dtype == pl.Binary:
+                df = df.with_columns(pl.col(col).map_elements(cloudpickle.loads, return_dtype=pl.Object).alias(col))
         return df
 
     def _update_max_id_per_time(self) -> None:
@@ -619,6 +632,7 @@ class SQLGraph(BaseGraph):
                 connection=session.connection(),
             )
             node_df = self._cast_boolean_columns(self.Node, node_df)
+            node_df = self._unpickle_bytes_columns(node_df)
 
         if single_node:
             return node_df
@@ -929,6 +943,7 @@ class SQLGraph(BaseGraph):
             connection=session.connection(),
         )
         nodes_df = self._cast_boolean_columns(self.Node, nodes_df)
+        nodes_df = self._unpickle_bytes_columns(nodes_df)
 
         # match node_ids ordering
         if node_ids is not None and not nodes_df.is_empty():
@@ -991,6 +1006,7 @@ class SQLGraph(BaseGraph):
                 connection=session.connection(),
             )
             edges_df = self._cast_boolean_columns(self.Edge, edges_df)
+            edges_df = self._unpickle_bytes_columns(edges_df)
 
         if unpack:
             edges_df = unpack_array_attrs(edges_df)
