@@ -431,7 +431,8 @@ class SQLGraph(BaseGraph):
     def bulk_add_edges(
         self,
         edges: list[dict[str, Any]],
-    ) -> None:
+        return_ids: bool = False,
+    ) -> list[int] | None:
         """
         Add multiple edges to the graph efficiently.
 
@@ -443,6 +444,9 @@ class SQLGraph(BaseGraph):
         edges : list[dict[str, Any]]
             List of edge attribute dictionaries. Each dictionary must contain
             "source_id" and "target_id" keys, plus any additional feature keys.
+        return_ids : bool
+            Whether to return the IDs of the added edges.
+            If False, the edges are added and the method returns None.
 
         Examples
         --------
@@ -453,16 +457,28 @@ class SQLGraph(BaseGraph):
         ]
         graph.bulk_add_edges(edges)
         ```
+
+        Return
+        ------
+        list[int] | None
+            The IDs of the added edges.
         """
         if len(edges) == 0:
-            return
+            if return_ids:
+                return []
+            return None
 
         for edge in edges:
             _data_numpy_to_native(edge)
 
         with Session(self._engine) as session:
-            session.execute(sa.insert(self.Edge), edges)
-            session.commit()
+            if return_ids:
+                result = session.execute(sa.insert(self.Edge).returning(self.Edge.edge_id), edges)
+                session.commit()
+                return list(result.scalars().all())
+            else:
+                session.execute(sa.insert(self.Edge), edges)
+                session.commit()
 
     def add_overlap(
         self,

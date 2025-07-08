@@ -12,6 +12,8 @@ license = "MIT"
 keywords = ["cell-tracking", "tracking", "multi-object-tracking", "computer-vision", "graph", "machine-learning"]
 authors = [
   { name = "Jordao Bragantini", email = "jordao.bragantini@czbiohub.org" },
+  { name = "Ilan Theodoro", email = "ilan.silva@czbiohub.org" },
+  { name = "Alexander Nguyen", email = "nguyencalex3@gmail.com" },
   { name = "Teun Huijben", email = "teun.huijben@czbiohub.org" },
   { name = "Caroline Malin-Mayor", email = "malinmayorc@janelia.hhmi.org" },
   { name = "Anniek Stokkermans", email = "a.stokkermans@hubrecht.eu" },
