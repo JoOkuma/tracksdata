@@ -532,7 +532,7 @@ class RustWorkXGraph(BaseGraph):
         if node_attr_comps:
             filtered_node_ids = self.filter_nodes_by_attrs(*node_attr_comps)
             if node_ids is not None:
-                node_ids = np.intersect1d(node_ids, filtered_node_ids)
+                node_ids = np.intersect1d(node_ids, filtered_node_ids).tolist()
             else:
                 node_ids = filtered_node_ids
 

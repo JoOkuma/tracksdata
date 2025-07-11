@@ -9,9 +9,10 @@ import numpy as np
 import polars as pl
 from numpy.typing import ArrayLike
 
-from tracksdata.attrs import AttrComparison
+from tracksdata.attrs import AttrComparison, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.utils._logging import LOG
+from tracksdata.utils._multiprocessing import multiprocessing_apply
 
 if TYPE_CHECKING:
     from tracksdata.graph._graph_view import GraphView
@@ -714,16 +715,14 @@ class BaseGraph(abc.ABC):
             attrs={matched_node_id_key: other_ids, match_score_key: ious},
         )
 
-        other_to_node_ids = dict(zip(other_ids, node_ids, strict=False))
+        other_to_node_ids = dict(zip(other_ids, node_ids, strict=True))
 
         self_edges_df = self.edge_attrs(attr_keys=[])
         other_edges_df = other.edge_attrs(attr_keys=[])
 
         other_edges_df = other_edges_df.with_columns(
-            *{
-                col: other_edges_df[col].map_elements(other_to_node_ids.get, return_dtype=pl.Int64).alias(col)
-                for col in [DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET]
-            }
+            other_edges_df[col].map_elements(other_to_node_ids.get, return_dtype=pl.Int64).alias(col)
+            for col in [DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET]
         )
 
         edge_ids = self_edges_df.join(
@@ -793,3 +792,40 @@ class BaseGraph(abc.ABC):
             graph.bulk_add_overlaps(overlaps.tolist())
 
         return graph
+
+    def compute_overlaps(self, iou_threshold: float = 0.0) -> None:
+        """
+        Find overlapping nodes within each frame and add them their overlap relation into the graph.
+
+        Parameters
+        ----------
+        iou_threshold : float
+            Nodes with an IoU greater than this threshold are considered overlapping.
+            If 0, all nodes are considered overlapping.
+
+        Examples
+        --------
+        ```python
+        graph.set_overlaps(iou_threshold=0.5)
+        ```
+        """
+        if iou_threshold < 0.0 or iou_threshold > 1.0:
+            raise ValueError("iou_threshold must be between 0.0 and 1.0")
+
+        def _estimate_overlaps(t: int) -> list[list[int, 2]]:
+            node_ids = self.filter_nodes_by_attrs(NodeAttr(DEFAULT_ATTR_KEYS.T) == t)
+            masks = self.node_attrs(node_ids=node_ids, attr_keys=[DEFAULT_ATTR_KEYS.MASK])[DEFAULT_ATTR_KEYS.MASK]
+            overlaps = []
+            for i in range(len(masks)):
+                mask_i = masks[i]
+                for j in range(i + 1, len(masks)):
+                    if mask_i.iou(masks[j]) > iou_threshold:
+                        overlaps.append([node_ids[i], node_ids[j]])
+            return overlaps
+
+        for overlaps in multiprocessing_apply(
+            func=_estimate_overlaps,
+            sequence=self.time_points(),
+            desc="Setting overlaps",
+        ):
+            self.bulk_add_overlaps(overlaps)

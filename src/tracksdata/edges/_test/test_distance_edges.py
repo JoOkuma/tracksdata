@@ -10,7 +10,7 @@ def test_distance_edges_init_default_params() -> None:
     """Test initialization with default parameters."""
     operator = DistanceEdges(distance_threshold=10.0, n_neighbors=3)
 
-    assert operator.output_key == DEFAULT_ATTR_KEYS.EDGE_WEIGHT
+    assert operator.output_key == DEFAULT_ATTR_KEYS.EDGE_DIST
     assert operator.distance_threshold == 10.0
     assert operator.n_neighbors == 3
     assert operator.attr_keys is None
@@ -106,7 +106,7 @@ def test_distance_edges_add_edges_2d_coordinates() -> None:
 
     # Check that edge weights are added
     edges_df = graph.edge_attrs()
-    assert DEFAULT_ATTR_KEYS.EDGE_WEIGHT in edges_df.columns
+    assert DEFAULT_ATTR_KEYS.EDGE_DIST in edges_df.columns
 
 
 def test_distance_edges_add_edges_3d_coordinates() -> None:

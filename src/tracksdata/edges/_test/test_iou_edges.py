@@ -33,7 +33,7 @@ def test_iou_edges_add_weights(n_workers: int) -> None:
 
     # Register attribute keys
     graph.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Create test masks
     mask1_data = np.array([[True, True], [True, False]], dtype=bool)
@@ -51,8 +51,8 @@ def test_iou_edges_add_weights(n_workers: int) -> None:
     node3 = graph.add_node({DEFAULT_ATTR_KEYS.T: 2, DEFAULT_ATTR_KEYS.MASK: mask3})
 
     # Add edge
-    edge_id_1 = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
-    edge_id_2 = graph.add_edge(node2, node3, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge_id_1 = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
+    edge_id_2 = graph.add_edge(node2, node3, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     # Create operator and add weights
     operator = IoUEdgeAttr(output_key="iou_score")
@@ -83,7 +83,7 @@ def test_iou_edges_no_overlap() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Create non-overlapping masks
     mask1_data = np.array([[True, True], [False, False]], dtype=bool)
@@ -97,7 +97,7 @@ def test_iou_edges_no_overlap() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, DEFAULT_ATTR_KEYS.MASK: mask2})
 
     # Add edge
-    edge_id = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge_id = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     # Create operator and add weights
     operator = IoUEdgeAttr(output_key="iou_score")
@@ -122,7 +122,7 @@ def test_iou_edges_perfect_overlap() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Create identical masks
     mask_data = np.array([[True, True], [True, False]], dtype=bool)
@@ -134,7 +134,7 @@ def test_iou_edges_perfect_overlap() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, DEFAULT_ATTR_KEYS.MASK: mask2})
 
     # Add edge
-    edge_id = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge_id = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     # Create operator and add weights
     operator = IoUEdgeAttr(output_key="iou_score")
@@ -158,7 +158,7 @@ def test_iou_edges_custom_mask_key() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key("custom_mask", None)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Create test masks
     mask1_data = np.array([[True, True], [True, True]], dtype=bool)
@@ -172,7 +172,7 @@ def test_iou_edges_custom_mask_key() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "custom_mask": mask2})
 
     # Add edge
-    edge_id = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge_id = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     # Create operator with custom mask key
     operator = IoUEdgeAttr(output_key="iou_score", mask_key="custom_mask")

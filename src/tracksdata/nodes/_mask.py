@@ -55,11 +55,15 @@ class Mask:
 
     def __getstate__(self) -> dict:
         data_dict = self.__dict__.copy()
-        data_dict["_mask"] = blosc2.pack_array(self._mask)
+        prev_nthreads = blosc2.set_nthreads(1)
+        data_dict["_mask"] = blosc2.pack_array2(self._mask)
+        blosc2.set_nthreads(prev_nthreads)
         return data_dict
 
     def __setstate__(self, state: dict) -> None:
-        state["_mask"] = blosc2.unpack_array(state["_mask"])
+        prev_nthreads = blosc2.set_nthreads(1)
+        state["_mask"] = blosc2.unpack_array2(state["_mask"])
+        blosc2.set_nthreads(prev_nthreads)
         self.__dict__.update(state)
 
     @property

@@ -108,7 +108,7 @@ def test_ilp_solver_solve_simple_case() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
@@ -116,8 +116,8 @@ def test_ilp_solver_solve_simple_case() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 2.0, "y": 2.0})
 
     # Add edges with weights (negative weights for minimization)
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
-    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
+    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
 
     solver = ILPSolver(return_solution=True)
     solution_graph = solver.solve(graph)
@@ -148,14 +148,14 @@ def test_ilp_solver_solve_with_appearance_weight() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 1.0, "y": 1.0})
 
     # Add edge
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.1})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.1})
 
     # Use positive appearance weight to penalize appearances
     solver = ILPSolver(appearance_weight=1.0)
@@ -188,14 +188,14 @@ def test_ilp_solver_solve_with_disappearance_weight() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 1.0, "y": 1.0})
 
     # Add edge
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.1})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.1})
 
     # Use positive disappearance weight to penalize disappearances
     solver = ILPSolver(disappearance_weight=1.0)
@@ -228,7 +228,7 @@ def test_ilp_solver_solve_with_division_weight() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes for division scenario
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
@@ -236,8 +236,8 @@ def test_ilp_solver_solve_with_division_weight() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 2.0, "y": 2.0})
 
     # Add edges to create potential division
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
-    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.1})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
+    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.1})
 
     # Use positive division weight to penalize divisions
     solver = ILPSolver(
@@ -310,14 +310,14 @@ def test_ilp_solver_solve_custom_node_weight_expr() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("quality", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes with quality attribute
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "quality": 0.9})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 1.0, "quality": 0.7})
 
     # Add edge
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
 
     # Use node quality as weight (negative to encourage high quality nodes)
     node_weight_expr = -Attr("quality")
@@ -338,12 +338,12 @@ def test_ilp_solver_solve_custom_output_key() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes and edges
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 1.0, "y": 1.0})
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
 
     custom_key = "my_ilp_solution"
     solver = ILPSolver(output_key=custom_key)
@@ -366,7 +366,7 @@ def test_ilp_solver_solve_with_all_weights() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
@@ -374,11 +374,11 @@ def test_ilp_solver_solve_with_all_weights() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 2.0, "y": 2.0})
 
     # Add edges
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.5})
-    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.5})
+    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
 
     solver = ILPSolver(
-        edge_weight=DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight=DEFAULT_ATTR_KEYS.EDGE_DIST,
         node_weight=-0.5,  # Encourage node selection
         appearance_weight=0.3,  # Penalize appearances
         disappearance_weight=0.2,  # Penalize disappearances
@@ -431,7 +431,7 @@ def test_ilp_solver_division_constraint() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Create a scenario where division would be tempting but should be constrained
     # Time 0: 1 parent node
@@ -442,8 +442,8 @@ def test_ilp_solver_division_constraint() -> None:
     child2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": -1.0, "y": 0.0})
 
     # Add edges from parent to both children with negative weights
-    graph.add_edge(parent_node, child1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -5.0})
-    graph.add_edge(parent_node, child2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -3.0})
+    graph.add_edge(parent_node, child1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -5.0})
+    graph.add_edge(parent_node, child2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -3.0})
 
     # Use negative division weight to make division attractive
     # But positive edge weights to make connections costly
@@ -452,7 +452,7 @@ def test_ilp_solver_division_constraint() -> None:
         node_weight=0.0,  # Neutral node cost
         division_weight=1.5,  # Penalize divisions, but not too much
         appearance_weight=1.0,  # Penalize appearances
-        edge_weight=DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight=DEFAULT_ATTR_KEYS.EDGE_DIST,
     )
 
     solver.solve(graph)
@@ -505,7 +505,7 @@ def test_ilp_solver_solve_with_inf_expr() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 5.0})
@@ -513,11 +513,11 @@ def test_ilp_solver_solve_with_inf_expr() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 2.0, "y": 3.0})
 
     # Add edges
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.5})
-    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.5})
+    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
 
     solver = ILPSolver(
-        edge_weight=DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight=DEFAULT_ATTR_KEYS.EDGE_DIST,
         division_weight=100.0 * Attr("y")
         - math.inf * (Attr("x") == 0.0),  # Despite the penalization it's selected because of inf
     )
@@ -537,17 +537,17 @@ def test_ilp_solver_solve_with_pos_inf_rejection() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 1.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 0.0})  # This node will be rejected
 
     # Add edge with attractive weight
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -5.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -5.0})
 
     solver = ILPSolver(
-        edge_weight=DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight=DEFAULT_ATTR_KEYS.EDGE_DIST,
         node_weight=0.1 + math.inf * (Attr("x") == 0.0),  # Reject nodes where x == 0
     )
     solver.solve(graph)
@@ -566,17 +566,17 @@ def test_ilp_solver_solve_with_neg_inf_node_weight() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key("priority", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "priority": 1.0})  # High priority
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "priority": 0.0})
 
     # Add edge with costly weight
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 10.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 10.0})
 
     solver = ILPSolver(
-        edge_weight=DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight=DEFAULT_ATTR_KEYS.EDGE_DIST,
         node_weight=-math.inf * (Attr("priority") == 1.0),  # Force high priority nodes
         appearance_weight=5.0,  # Penalize appearances
     )
@@ -628,7 +628,7 @@ def test_ilp_solver_solve_with_overlaps() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes - overlapping pair at time t=1
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
@@ -641,13 +641,13 @@ def test_ilp_solver_solve_with_overlaps() -> None:
 
     # Add edges with different weights
     # node0 -> node1 (better weight)
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
     # node0 -> node2 (worse weight)
-    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
+    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
     # node1 -> node3
-    edge3 = graph.add_edge(node1, node3, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    edge3 = graph.add_edge(node1, node3, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
     # node2 -> node3
-    edge4 = graph.add_edge(node2, node3, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    edge4 = graph.add_edge(node2, node3, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
 
     solver = ILPSolver()
     solver.solve(graph)

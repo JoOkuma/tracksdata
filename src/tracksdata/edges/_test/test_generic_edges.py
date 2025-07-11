@@ -42,7 +42,7 @@ def test_generic_edges_add_weights_single_attr_key() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes at time 0
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 1.0})
@@ -50,8 +50,8 @@ def test_generic_edges_add_weights_single_attr_key() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 7.0})
 
     # Add edges
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
-    edge2 = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
+    edge2 = graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     operator = GenericFuncEdgeAttrs(func=_scalar_distance_func, attr_keys="x", output_key="distance")
 
@@ -62,7 +62,7 @@ def test_generic_edges_add_weights_single_attr_key() -> None:
 
     assert len(edges_df) == 2
     assert "distance" in edges_df.columns
-    assert DEFAULT_ATTR_KEYS.EDGE_WEIGHT in edges_df.columns
+    assert DEFAULT_ATTR_KEYS.EDGE_DIST in edges_df.columns
     assert DEFAULT_ATTR_KEYS.EDGE_SOURCE in edges_df.columns
     assert DEFAULT_ATTR_KEYS.EDGE_TARGET in edges_df.columns
     assert DEFAULT_ATTR_KEYS.EDGE_ID in edges_df.columns
@@ -80,14 +80,14 @@ def test_generic_edges_add_weights_multiple_attr_keys() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes at time 0
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 3.0, "y": 4.0})
 
     # Add edge
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     def euclidean_distance(source_attrs, target_attrs):
         dx = source_attrs["x"] - target_attrs["x"]
@@ -113,7 +113,7 @@ def test_generic_edges_add_weights_all_time_points() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes at different time points
     node0_t0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 1.0})
@@ -122,8 +122,8 @@ def test_generic_edges_add_weights_all_time_points() -> None:
     node1_t1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 6.0})
 
     # Add edges from t=0 to t=1 (temporal edges)
-    edge_t0_to_t1_1 = graph.add_edge(node0_t0, node0_t1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
-    edge_t0_to_t1_2 = graph.add_edge(node1_t0, node1_t1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    edge_t0_to_t1_1 = graph.add_edge(node0_t0, node0_t1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
+    edge_t0_to_t1_2 = graph.add_edge(node1_t0, node1_t1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     operator = GenericFuncEdgeAttrs(func=_scalar_distance_func, attr_keys="x", output_key="distance")
 
@@ -164,12 +164,12 @@ def test_generic_edges_creates_output_key() -> None:
 
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes and edge
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 1.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 4.0})
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     operator = GenericFuncEdgeAttrs(func=_scalar_distance_func, attr_keys="x", output_key="new_distance_key")
 
@@ -193,14 +193,14 @@ def test_generic_edges_dict_input_function() -> None:
     # Register attribute keys
     graph.add_node_attr_key("value", 0.0)
     graph.add_node_attr_key("weight", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "value": 10.0, "weight": 2.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "value": 20.0, "weight": 3.0})
 
     # Add edge
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 0.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 0.0})
 
     def weighted_difference(source_attrs: dict[str, float], target_attrs: dict[str, float]) -> float:
         diff = abs(source_attrs["value"] - target_attrs["value"])

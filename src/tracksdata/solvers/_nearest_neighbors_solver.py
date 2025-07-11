@@ -184,7 +184,7 @@ class NearestNeighborsSolver(BaseSolver):
     def __init__(
         self,
         max_children: int = 2,
-        edge_weight: str | ExprInput = DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight: str | ExprInput = DEFAULT_ATTR_KEYS.EDGE_DIST,
         output_key: str = DEFAULT_ATTR_KEYS.SOLUTION,
         reset: bool = True,
         return_solution: bool = True,

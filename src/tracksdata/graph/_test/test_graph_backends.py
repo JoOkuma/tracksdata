@@ -783,12 +783,12 @@ def test_match_method(graph_backend: BaseGraph) -> None:
     node2 = graph_backend.add_node({"t": 1, "x": 2.0, "y": 2.0, DEFAULT_ATTR_KEYS.MASK: mask2})
     node3 = graph_backend.add_node({"t": 2, "x": 3.0, "y": 3.0, DEFAULT_ATTR_KEYS.MASK: mask3})
 
-    # Add edges to first graph
     graph_backend.add_edge_attr_key("weight", 0.0)
+    # this will not be matched
     graph_backend.add_edge(node1, node2, {"weight": 0.5})
     graph_backend.add_edge(node2, node3, {"weight": 0.3})
 
-    # this edge won't be matched
+    # this will be matched
     graph_backend.add_edge(node1, node3, {"weight": 0.3})
 
     # Create second graph (other/reference) with overlapping masks
@@ -807,30 +807,31 @@ def test_match_method(graph_backend: BaseGraph) -> None:
     ref_mask1_data = np.array([[True, True], [True, False]], dtype=bool)
     ref_mask1 = Mask(ref_mask1_data, bbox=np.array([0, 0, 2, 2]))
 
-    # This mask should NOT overlap with mask2 (IoU < 0.5, should not match)
-    ref_mask2_data = np.array([[True]], dtype=bool)
-    ref_mask2 = Mask(ref_mask2_data, bbox=np.array([15, 15, 16, 16]))  # Different location
-
     # This mask overlaps significantly with mask3 (IoU > 0.5)
-    ref_mask3_data = np.array([[True, True, True, True]], dtype=bool)
-    ref_mask3 = Mask(ref_mask3_data, bbox=np.array([20, 20, 21, 24]))
+    ref_mask2_data = np.array([[True, True, True, True]], dtype=bool)
+    ref_mask2 = Mask(ref_mask2_data, bbox=np.array([20, 20, 21, 24]))
 
-    # This mask also overlaps significantly with mask3 (IoU > 0.5) but less than `ref_mask3`
+    # This mask should NOT overlap with other masks (IoU < 0.5, should not match)
+    ref_mask3_data = np.array([[True]], dtype=bool)
+    ref_mask3 = Mask(ref_mask3_data, bbox=np.array([15, 15, 16, 16]))  # Different location
+
+    # This mask also overlaps significantly with mask3 (IoU > 0.5) but less than `ref_mask2`
     # therefore it should not match
     ref_mask4_data = np.array([[True, True, True]], dtype=bool)
     ref_mask4 = Mask(ref_mask4_data, bbox=np.array([20, 21, 21, 24]))
 
     # Add nodes to reference graph
     ref_node1 = other_graph.add_node({"t": 0, "x": 1.1, "y": 1.1, DEFAULT_ATTR_KEYS.MASK: ref_mask1})
-    ref_node2 = other_graph.add_node({"t": 1, "x": 2.1, "y": 2.1, DEFAULT_ATTR_KEYS.MASK: ref_mask2})
-    ref_node3 = other_graph.add_node({"t": 2, "x": 3.1, "y": 3.1, DEFAULT_ATTR_KEYS.MASK: ref_mask3})
+    ref_node2 = other_graph.add_node({"t": 2, "x": 3.1, "y": 3.1, DEFAULT_ATTR_KEYS.MASK: ref_mask2})
+    ref_node3 = other_graph.add_node({"t": 1, "x": 2.1, "y": 2.1, DEFAULT_ATTR_KEYS.MASK: ref_mask3})
     ref_node4 = other_graph.add_node({"t": 2, "x": 3.1, "y": 3.1, DEFAULT_ATTR_KEYS.MASK: ref_mask4})
 
     # Add edges to reference graph - matching structure with first graph
     other_graph.add_edge_attr_key("weight", 0.0)
-    other_graph.add_edge(ref_node1, ref_node2, {"weight": 0.6})  # ref_node1 -> ref_node2
-    other_graph.add_edge(ref_node2, ref_node3, {"weight": 0.7})  # ref_node2 -> ref_node3
-    other_graph.add_edge(ref_node2, ref_node4, {"weight": 0.5})  # ref_node3 -> ref_node4
+    other_graph.add_edge(ref_node1, ref_node3, {"weight": 0.6})  # ref_node1 -> ref_node2
+    other_graph.add_edge(ref_node1, ref_node2, {"weight": 0.4})  # ref_node1 -> ref_node3
+    other_graph.add_edge(ref_node3, ref_node2, {"weight": 0.7})  # ref_node2 -> ref_node3
+    other_graph.add_edge(ref_node3, ref_node4, {"weight": 0.5})  # ref_node3 -> ref_node4
 
     # Test the match method
     match_node_id_key = "matched_node_id"
@@ -877,9 +878,9 @@ def test_match_method(graph_backend: BaseGraph) -> None:
     msg = f"node2 match score should be 0.0, got {node_matches[node2]['score']}"
     assert node_matches[node2]["score"] == 0.0, msg
 
-    # node3 (mask3) should match ref_node3 (ref_mask3) - high IoU
-    msg = f"node3 should match ref_node3, got {node_matches[node3]['matched_id']}"
-    assert node_matches[node3]["matched_id"] == ref_node3, msg
+    # node3 (mask3) should match ref_node2 (ref_mask2) - high IoU
+    msg = f"node3 should match ref_node2, got {node_matches[node3]['matched_id']}"
+    assert node_matches[node3]["matched_id"] == ref_node2, msg
     msg = f"node3 match score should be > 0.5, got {node_matches[node3]['score']}"
     assert node_matches[node3]["score"] > 0.5, msg
 
@@ -894,7 +895,7 @@ def test_match_method(graph_backend: BaseGraph) -> None:
 
     # After your bug fixes, both edges are matching
     edge_matches = edges_df[edge_match_key].to_list()
-    expected_matches = np.array([True, True, False])
+    expected_matches = np.array([False, False, True])
 
     np.testing.assert_array_equal(edge_matches, expected_matches)
 
@@ -1181,3 +1182,100 @@ def test_from_other_with_edges(graph_backend: BaseGraph) -> None:
 
     assert len(new_graph.overlaps()) == len(graph_backend.overlaps())
     assert new_graph.overlaps()[0] == [new_node_ids[0], new_node_ids[2]]
+
+
+def test_compute_overlaps_basic(graph_backend: BaseGraph) -> None:
+    """Test basic compute_overlaps functionality."""
+    graph_backend.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
+
+    # Create overlapping masks at time 0
+    mask1_data = np.array([[True, True], [True, True]], dtype=bool)
+    mask1 = Mask(mask1_data, bbox=np.array([0, 0, 2, 2]))
+
+    mask2_data = np.array([[True, True], [False, False]], dtype=bool)
+    mask2 = Mask(mask2_data, bbox=np.array([0, 0, 2, 2]))
+
+    node1 = graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask1})
+    node2 = graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask2})
+
+    graph_backend.compute_overlaps(iou_threshold=0.3)
+
+    assert graph_backend.has_overlaps()
+    overlaps = graph_backend.overlaps()
+    assert len(overlaps) == 1
+    assert [node1, node2] in overlaps
+
+
+def test_compute_overlaps_with_threshold(graph_backend: BaseGraph) -> None:
+    """Test compute_overlaps with different IoU thresholds."""
+    graph_backend.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
+
+    # Create masks with different overlap levels
+    mask1_data = np.array([[True, True], [True, True]], dtype=bool)
+    mask1 = Mask(mask1_data, bbox=np.array([0, 0, 2, 2]))
+
+    # Partially overlapping mask (IoU = 0.5)
+    mask2_data = np.array([[True, True], [False, False]], dtype=bool)
+    mask2 = Mask(mask2_data, bbox=np.array([0, 0, 2, 2]))
+
+    # Non-overlapping mask
+    mask3_data = np.array([[True, True], [True, True]], dtype=bool)
+    mask3 = Mask(mask3_data, bbox=np.array([10, 10, 12, 12]))
+
+    node1 = graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask1})
+    node2 = graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask2})
+    graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask3})
+
+    # With threshold 0.7, no overlaps should be found (IoU = 0.5 < 0.7)
+    graph_backend.compute_overlaps(iou_threshold=0.7)
+    overlaps = graph_backend.overlaps()
+    valid_overlaps = [o for o in overlaps if None not in o]
+    assert len(valid_overlaps) == 0
+
+    # With threshold 0.3, mask1 and mask2 should overlap
+    graph_backend.compute_overlaps(iou_threshold=0.3)
+    overlaps = graph_backend.overlaps()
+    valid_overlaps = [o for o in overlaps if None not in o]
+    assert len(valid_overlaps) == 1
+    assert [node1, node2] in valid_overlaps
+
+
+def test_compute_overlaps_multiple_timepoints(graph_backend: BaseGraph) -> None:
+    """Test compute_overlaps across multiple time points."""
+    graph_backend.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, None)
+
+    # Time 0: overlapping masks
+    mask1_t0 = Mask(np.array([[True, True], [True, True]], dtype=bool), bbox=np.array([0, 0, 2, 2]))
+    mask2_t0 = Mask(np.array([[True, True], [False, False]], dtype=bool), bbox=np.array([0, 0, 2, 2]))
+
+    # Time 1: non-overlapping masks
+    mask1_t1 = Mask(np.array([[True, True], [True, True]], dtype=bool), bbox=np.array([0, 0, 2, 2]))
+    mask2_t1 = Mask(np.array([[True, True], [True, True]], dtype=bool), bbox=np.array([10, 10, 12, 12]))
+
+    node1_t0 = graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask1_t0})
+    node2_t0 = graph_backend.add_node({"t": 0, DEFAULT_ATTR_KEYS.MASK: mask2_t0})
+    graph_backend.add_node({"t": 1, DEFAULT_ATTR_KEYS.MASK: mask1_t1})
+    graph_backend.add_node({"t": 1, DEFAULT_ATTR_KEYS.MASK: mask2_t1})
+
+    graph_backend.compute_overlaps(iou_threshold=0.3)
+
+    overlaps = graph_backend.overlaps()
+    valid_overlaps = [o for o in overlaps if None not in o]
+    assert len(valid_overlaps) == 1
+    assert [node1_t0, node2_t0] in valid_overlaps
+
+
+def test_compute_overlaps_invalid_threshold(graph_backend: BaseGraph) -> None:
+    """Test compute_overlaps with invalid threshold values."""
+    with pytest.raises(ValueError, match="iou_threshold must be between 0.0 and 1.0"):
+        graph_backend.compute_overlaps(iou_threshold=-0.1)
+
+    with pytest.raises(ValueError, match="iou_threshold must be between 0.0 and 1.0"):
+        graph_backend.compute_overlaps(iou_threshold=1.1)
+
+
+def test_compute_overlaps_empty_graph(graph_backend: BaseGraph) -> None:
+    """Test compute_overlaps on empty graph."""
+    graph_backend.compute_overlaps(iou_threshold=0.5)
+    assert not graph_backend.has_overlaps()
+    assert graph_backend.overlaps() == []

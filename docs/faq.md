@@ -45,11 +45,17 @@ graph.add_edge(source_id, target_id, {"confidence": 0.95})
 Inherit from :class:`tracksdata.edges.BaseEdgesOperator` or :class:`tracksdata.nodes.BaseNodesOperator` and implement `_add_edges_per_time` or `_add_nodes_per_time`:
 
 ```python
-from tracksdata.nodes import BaseNodesOperator
+import tracksdata as td
 
-class CustomNodes(BaseNodesOperator):
-    def _add_nodes_per_time(self, graph, *, t):
-        # Your custom logic here
+class CustomNodes(td.nodes.BaseNodesOperator):
+    def add_nodes(
+        self,
+        graph: td.graph.BaseGraph,
+        *,
+        t: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # Your custom logic here to add nodes to the graph
         pass
 ```
 
@@ -58,9 +64,9 @@ class CustomNodes(BaseNodesOperator):
 TracksData provides utilities for converting to napari format:
 
 ```python
-from tracksdata.functional import to_napari_format
+import tracksdata as td
 
-labels, tracks_df, track_graph = to_napari_format(solution_graph)
+labels, tracks_df, track_graph = td.functional.to_napari_format(solution_graph)
 
 viewer = napari.Viewer()
 viewer.add_labels(labels)

@@ -52,17 +52,17 @@ TracksData uses a flexible attribute system:
 Attributes are used to filter nodes or edges, or to formulate the objective function for solvers.
 
 ```python
-from tracksdata.attrs import NodeAttr, EdgeAttr
+import tracksdata as td
 
 # Simple attribute access
-x_coords = NodeAttr("x")
+x_coords = td.NodeAttr("x")
 
 # Mathematical expressions
-distance_cost = EdgeAttr("distance") + 0.1 * EdgeAttr("angle_change")
+distance_cost = td.EdgeAttr("distance") + 0.1 * td.EdgeAttr("angle_change")
 
 # Comparison operations for filtering
-recent_nodes = NodeAttr("t") >= 10
-large_objects = NodeAttr("area") > 100
+recent_nodes = td.NodeAttr("t") >= 10
+large_objects = td.NodeAttr("area") > 100
 ```
 
 ## Data Flow

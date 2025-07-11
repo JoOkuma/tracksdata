@@ -68,7 +68,7 @@ def test_nearest_neighbors_solver_solve_simple_case() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
@@ -76,8 +76,8 @@ def test_nearest_neighbors_solver_solve_simple_case() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 2.0, "y": 2.0})
 
     # Add edges with weights
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 1.0})
-    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 2.0})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 1.0})
+    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 2.0})
 
     solver = NearestNeighborsSolver(max_children=1)
     solver.solve(graph)
@@ -104,7 +104,7 @@ def test_nearest_neighbors_solver_solve_max_children_constraint() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})  # Parent
@@ -113,9 +113,9 @@ def test_nearest_neighbors_solver_solve_max_children_constraint() -> None:
     node3 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 3.0, "y": 3.0})  # Child 3
 
     # Add edges with different weights (lower weight = better)
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 1.0})  # Best
-    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 2.0})  # Second best
-    _ = graph.add_edge(node0, node3, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 3.0})  # Worst
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 1.0})  # Best
+    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 2.0})  # Second best
+    _ = graph.add_edge(node0, node3, {DEFAULT_ATTR_KEYS.EDGE_DIST: 3.0})  # Worst
 
     solver = NearestNeighborsSolver(max_children=2)
     solver.solve(graph)
@@ -127,7 +127,7 @@ def test_nearest_neighbors_solver_solve_max_children_constraint() -> None:
     assert len(selected_edges) == 2
 
     # Check that the best 2 edges are selected
-    selected_weights = selected_edges[DEFAULT_ATTR_KEYS.EDGE_WEIGHT].to_list()
+    selected_weights = selected_edges[DEFAULT_ATTR_KEYS.EDGE_DIST].to_list()
 
     assert 1.0 in selected_weights
     assert 2.0 in selected_weights
@@ -144,7 +144,7 @@ def test_nearest_neighbors_solver_solve_one_parent_constraint() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})  # Parent 1
@@ -152,8 +152,8 @@ def test_nearest_neighbors_solver_solve_one_parent_constraint() -> None:
     node2 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 0.5, "y": 1.0})  # Child
 
     # Add edges to the same child from different parents
-    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 1.0})  # Better edge
-    graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 2.0})  # Worse edge
+    graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 1.0})  # Better edge
+    graph.add_edge(node1, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: 2.0})  # Worse edge
 
     solver = NearestNeighborsSolver()
     solver.solve(graph)
@@ -166,7 +166,7 @@ def test_nearest_neighbors_solver_solve_one_parent_constraint() -> None:
     assert len(child_edges) == 1
 
     # Check that the better edge is selected
-    assert child_edges[DEFAULT_ATTR_KEYS.EDGE_WEIGHT].to_list()[0] == 1.0
+    assert child_edges[DEFAULT_ATTR_KEYS.EDGE_DIST].to_list()[0] == 1.0
 
 
 def test_nearest_neighbors_solver_solve_custom_weight_expr() -> None:
@@ -244,12 +244,12 @@ def test_nearest_neighbors_solver_solve_custom_output_key() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes and edges
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
     node1 = graph.add_node({DEFAULT_ATTR_KEYS.T: 1, "x": 1.0, "y": 1.0})
-    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: 1.0})
+    graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: 1.0})
 
     custom_key = "my_solution"
     solver = NearestNeighborsSolver(output_key=custom_key)
@@ -272,7 +272,7 @@ def test_nearest_neighbors_solver_solve_with_overlaps() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Add nodes - overlapping pair at time t=1
     node0 = graph.add_node({DEFAULT_ATTR_KEYS.T: 0, "x": 0.0, "y": 0.0})
@@ -285,13 +285,13 @@ def test_nearest_neighbors_solver_solve_with_overlaps() -> None:
 
     # Add edges with different weights
     # node0 -> node1 (better weight)
-    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    edge1 = graph.add_edge(node0, node1, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
     # node0 -> node2 (worse weight)
-    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -1.0})
+    edge2 = graph.add_edge(node0, node2, {DEFAULT_ATTR_KEYS.EDGE_DIST: -1.0})
     # node1 -> node3
-    edge3 = graph.add_edge(node1, node3, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    edge3 = graph.add_edge(node1, node3, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
     # node2 -> node3
-    edge4 = graph.add_edge(node2, node3, {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: -2.0})
+    edge4 = graph.add_edge(node2, node3, {DEFAULT_ATTR_KEYS.EDGE_DIST: -2.0})
 
     solver = NearestNeighborsSolver(max_children=2)
     solver.solve(graph)
@@ -327,7 +327,7 @@ def test_nearest_neighbors_solver_solve_large_graph() -> None:
     # Register attribute keys
     graph.add_node_attr_key("x", 0.0)
     graph.add_node_attr_key("y", 0.0)
-    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_WEIGHT, 0.0)
+    graph.add_edge_attr_key(DEFAULT_ATTR_KEYS.EDGE_DIST, 0.0)
 
     # Create a more complex graph structure
     # Time 0: nodes 0, 1
@@ -357,7 +357,7 @@ def test_nearest_neighbors_solver_solve_large_graph() -> None:
     ]
 
     for source_idx, target_idx, weight in edges:
-        graph.add_edge(nodes[source_idx], nodes[target_idx], {DEFAULT_ATTR_KEYS.EDGE_WEIGHT: weight})
+        graph.add_edge(nodes[source_idx], nodes[target_idx], {DEFAULT_ATTR_KEYS.EDGE_DIST: weight})
 
     solver = NearestNeighborsSolver(max_children=2)
     solver.solve(graph)

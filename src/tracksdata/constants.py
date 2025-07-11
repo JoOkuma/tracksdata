@@ -54,7 +54,7 @@ class DefaultAttrKeys:
     TRACK_ID = "track_id"
 
     EDGE_ID = "edge_id"
-    EDGE_WEIGHT = "weight"
+    EDGE_DIST = "distance"
     EDGE_SOURCE = "source_id"
     EDGE_TARGET = "target_id"
 

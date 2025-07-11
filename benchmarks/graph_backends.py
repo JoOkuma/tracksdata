@@ -130,7 +130,7 @@ def _build_pipeline(
         (
             "nearest_neighbors_solver",
             NearestNeighborsSolver(
-                edge_weight=-EdgeAttr(DEFAULT_ATTR_KEYS.EDGE_WEIGHT),
+                edge_weight=-EdgeAttr(DEFAULT_ATTR_KEYS.EDGE_DIST),
                 max_children=2,
                 return_solution=False,
             ).solve,

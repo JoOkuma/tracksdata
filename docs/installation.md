@@ -41,6 +41,6 @@ pip install .[docs]
 You can verify the installation by importing the library:
 
 ```python
-import tracksdata
-print(tracksdata.__version__)
+import tracksdata as td
+print(td.__version__)
 ```

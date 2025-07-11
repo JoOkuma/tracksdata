@@ -1,9 +1,13 @@
+from typing import TYPE_CHECKING
+
 import polars as pl
 
-from tracksdata.array._graph_array import GraphArrayView
 from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.graph._base_graph import BaseGraph
+
+if TYPE_CHECKING:
+    from tracksdata.array._graph_array import GraphArrayView
 
 
 def to_napari_format(
@@ -69,6 +73,8 @@ def to_napari_format(
 
     if DEFAULT_ATTR_KEYS.MASK not in solution_graph.node_attr_keys:
         return tracks_data, dict_graph
+
+    from tracksdata.array._graph_array import GraphArrayView
 
     array_view = GraphArrayView(
         solution_graph,

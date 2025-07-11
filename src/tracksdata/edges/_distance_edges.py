@@ -92,7 +92,7 @@ class DistanceEdges(BaseEdgesOperator):
         distance_threshold: float,
         n_neighbors: int,
         delta_t: int = 1,
-        output_key: str = DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        output_key: str = DEFAULT_ATTR_KEYS.EDGE_DIST,
         attr_keys: Sequence[str] | None = None,
     ):
         if delta_t < 1:
@@ -108,7 +108,8 @@ class DistanceEdges(BaseEdgesOperator):
         """
         Initialize the edge attributes for the graph.
         """
-        graph.add_edge_attr_key(self.output_key, default_value=-99999.0)
+        if self.output_key not in graph.edge_attr_keys:
+            graph.add_edge_attr_key(self.output_key, default_value=-99999.0)
 
     def _add_edges_per_time(
         self,

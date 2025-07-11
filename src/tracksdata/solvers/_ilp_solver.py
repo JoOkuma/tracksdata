@@ -128,7 +128,7 @@ class ILPSolver(BaseSolver):
     def __init__(
         self,
         *,
-        edge_weight: str | ExprInput = DEFAULT_ATTR_KEYS.EDGE_WEIGHT,
+        edge_weight: str | ExprInput = DEFAULT_ATTR_KEYS.EDGE_DIST,
         node_weight: str | ExprInput = 0.0,
         appearance_weight: str | ExprInput = 0.0,
         disappearance_weight: str | ExprInput = 0.0,
