@@ -610,6 +610,7 @@ class BaseGraph(abc.ABC):
             Mapping of division as child track id (key) to parent track id (value) relationships.
         radius : ArrayLike
             Integer or N-dimensional array of radii.
+            If 0, no masks are added to the nodes.
         image_shape : tuple[int, ...] | None
             Shape of the image if available masks are cropped to fit the image.
         **kwargs : Any

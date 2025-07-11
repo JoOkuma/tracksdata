@@ -2,11 +2,12 @@ from collections.abc import Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import cloudpickle
 import numpy as np
 import polars as pl
 import rustworkx as rx
 import sqlalchemy as sa
-from sqlalchemy.orm import DeclarativeBase, Query, Session, load_only
+from sqlalchemy.orm import DeclarativeBase, Query, Session, aliased, load_only
 from sqlalchemy.sql.type_api import TypeEngine
 
 from tracksdata.attrs import AttrComparison, split_attr_comps
@@ -240,6 +241,26 @@ class SQLGraph(BaseGraph):
         for col in self._boolean_columns[table_class.__tablename__]:
             if col in df.columns:
                 df = df.with_columns(pl.col(col).cast(pl.Boolean))
+        return df
+
+    def _unpickle_bytes_columns(
+        self,
+        df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """
+        Unpickle bytes columns from the database.
+
+        Parameters
+        ----------
+        df : pl.DataFrame
+            The DataFrame to unpickle the bytes columns from.
+
+        Returns
+        -------
+        pl.DataFrame
+            The DataFrame with the bytes columns unpickled.
+        """
+        df = df.with_columns(pl.col(pl.Binary).map_elements(cloudpickle.loads, return_dtype=pl.Object))
         return df
 
     def _update_max_id_per_time(self) -> None:
@@ -619,6 +640,7 @@ class SQLGraph(BaseGraph):
                 connection=session.connection(),
             )
             node_df = self._cast_boolean_columns(self.Node, node_df)
+            node_df = self._unpickle_bytes_columns(node_df)
 
         if single_node:
             return node_df
@@ -785,6 +807,7 @@ class SQLGraph(BaseGraph):
 
         with Session(self._engine) as session:
             node_query = session.query(self.Node)
+            edge_query = session.query(self.Edge)
 
             node_filtered = False
 
@@ -792,19 +815,28 @@ class SQLGraph(BaseGraph):
                 node_query = node_query.filter(self.Node.node_id.in_(node_ids))
                 node_filtered = True
 
+                edge_query = edge_query.filter(
+                    self.Edge.source_id.in_(node_ids),
+                    self.Edge.target_id.in_(node_ids),
+                )
+
             if node_attr_comps:
                 node_query = _filter_query(node_query, self.Node, node_attr_comps)
                 node_ids = [i for (i,) in node_query.with_entities(self.Node.node_id).all()]
                 node_filtered = True
 
-            # selecting edges
-            edge_query = session.query(self.Edge)
+                SourceNode = aliased(self.Node)
+                TargetNode = aliased(self.Node)
 
-            if node_ids is not None:
-                edge_query = edge_query.filter(
-                    self.Edge.source_id.in_(node_ids),
-                    self.Edge.target_id.in_(node_ids),
+                edge_query = edge_query.join(
+                    SourceNode,
+                    self.Edge.source_id == SourceNode.node_id,
+                ).join(
+                    TargetNode,
+                    self.Edge.target_id == TargetNode.node_id,
                 )
+                edge_query = _filter_query(edge_query, SourceNode, node_attr_comps)
+                edge_query = _filter_query(edge_query, TargetNode, node_attr_comps)
 
             if edge_attr_comps:
                 edge_query = _filter_query(edge_query, self.Edge, edge_attr_comps)
@@ -919,6 +951,7 @@ class SQLGraph(BaseGraph):
             connection=session.connection(),
         )
         nodes_df = self._cast_boolean_columns(self.Node, nodes_df)
+        nodes_df = self._unpickle_bytes_columns(nodes_df)
 
         # match node_ids ordering
         if node_ids is not None and not nodes_df.is_empty():
@@ -981,6 +1014,7 @@ class SQLGraph(BaseGraph):
                 connection=session.connection(),
             )
             edges_df = self._cast_boolean_columns(self.Edge, edges_df)
+            edges_df = self._unpickle_bytes_columns(edges_df)
 
         if unpack:
             edges_df = unpack_array_attrs(edges_df)
