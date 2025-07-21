@@ -81,47 +81,63 @@ class GenericFuncEdgeAttrs(BaseEdgeAttrsOperator):
             return [], {}
 
         att_keys_list = self.attr_keys if isinstance(self.attr_keys, list) else [self.attr_keys]
+
+        # Optimize by getting node attrs once and doing two efficient joins
         nodes_df = graph_filter.node_attrs(attr_keys=[DEFAULT_ATTR_KEYS.NODE_ID, *att_keys_list])
 
-        source_df = edges_df.rename({DEFAULT_ATTR_KEYS.EDGE_SOURCE: DEFAULT_ATTR_KEYS.NODE_ID}).join(
-            nodes_df,
-            on=DEFAULT_ATTR_KEYS.NODE_ID,
+        # Create source dataframe with renamed columns
+        source_nodes_df = nodes_df.rename({col: f"{col}_source" for col in att_keys_list})
+
+        # Create target dataframe with renamed columns
+        target_nodes_df = nodes_df.rename({col: f"{col}_target" for col in att_keys_list})
+
+        # Join both at once for better performance
+        edges_with_attrs_df = edges_df.join(
+            source_nodes_df,
+            left_on=DEFAULT_ATTR_KEYS.EDGE_SOURCE,
+            right_on=DEFAULT_ATTR_KEYS.NODE_ID,
+            how="left",
+        ).join(
+            target_nodes_df,
+            left_on=DEFAULT_ATTR_KEYS.EDGE_TARGET,
+            right_on=DEFAULT_ATTR_KEYS.NODE_ID,
             how="left",
         )
 
-        target_df = edges_df.rename({DEFAULT_ATTR_KEYS.EDGE_TARGET: DEFAULT_ATTR_KEYS.NODE_ID}).join(
-            nodes_df,
-            on=DEFAULT_ATTR_KEYS.NODE_ID,
-            how="left",
-        )
-
-        for df in [source_df, target_df]:
-            if len(df) != len(edges_df):
-                raise ValueError(
-                    f"Number of edges ({len(edges_df)}) and nodes ({len(df)}) do not match. Something went wrong."
-                )
+        if len(edges_with_attrs_df) != len(edges_df):
+            raise ValueError(
+                f"Number of edges ({len(edges_df)}) and joined result ({len(edges_with_attrs_df)}) do not match. "
+                "Some nodes may be missing."
+            )
 
         weights = np.zeros(len(edges_df), dtype=np.float32)
 
         if isinstance(self.attr_keys, str):
-            # faster than creating a dict
+            # faster than creating a dict - use suffixed column names
+            source_col = f"{self.attr_keys}_source"
+            target_col = f"{self.attr_keys}_target"
             for i, (source_attr, target_attr) in enumerate(
                 zip(
-                    source_df[self.attr_keys],
-                    target_df[self.attr_keys],
+                    edges_with_attrs_df[source_col],
+                    edges_with_attrs_df[target_col],
                     strict=True,
                 )
             ):
                 weights[i] = self.func(source_attr, target_attr)
         else:
             # a bit more expensive to create a dict but more flexible
-            for i, (source_attr, target_attr) in enumerate(
+            source_cols = [f"{key}_source" for key in self.attr_keys]
+            target_cols = [f"{key}_target" for key in self.attr_keys]
+            for i, (source_row, target_row) in enumerate(
                 zip(
-                    source_df[self.attr_keys].iter_rows(named=True),
-                    target_df[self.attr_keys].iter_rows(named=True),
+                    edges_with_attrs_df[source_cols].iter_rows(named=True),
+                    edges_with_attrs_df[target_cols].iter_rows(named=True),
                     strict=True,
                 )
             ):
+                # Remove suffixes from keys for the function call
+                source_attr = {k.replace("_source", ""): v for k, v in source_row.items()}
+                target_attr = {k.replace("_target", ""): v for k, v in target_row.items()}
                 weights[i] = self.func(source_attr, target_attr)
 
         return edges_df[DEFAULT_ATTR_KEYS.EDGE_ID].to_list(), {self.output_key: weights}

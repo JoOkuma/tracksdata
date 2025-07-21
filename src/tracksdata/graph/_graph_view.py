@@ -201,6 +201,16 @@ class GraphView(RustWorkXGraph):
         include_targets: bool = False,
         include_sources: bool = False,
     ) -> RXFilter:
+        # Input validation - allow empty filter to return all nodes
+        # This is a valid use case for getting the full graph
+
+        if node_ids is not None:
+            # Validate node_ids exist in the graph (in root coordinates)
+            existing_root_ids = set(self.node_ids())
+            invalid_ids = [nid for nid in node_ids if nid not in existing_root_ids]
+            if invalid_ids:
+                raise ValueError(f"Invalid node_ids: {invalid_ids}. These nodes do not exist in the graph.")
+
         return IndexRXFilter(
             *attr_filters,
             graph=self,

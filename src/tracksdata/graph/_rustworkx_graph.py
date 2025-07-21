@@ -96,36 +96,44 @@ class RXFilter(BaseFilter):
 
         return node_ids
 
+    def _needs_edge_based_filtering(self) -> bool:
+        """Check if edge-based filtering is needed."""
+        return bool(self._edge_attr_comps) or self._include_targets or self._include_sources
+
+    def _get_edge_connected_node_ids(self) -> np.ndarray:
+        """Get node IDs that are connected to edges passing edge filters."""
+        edge_df = self._edge_attrs()
+        if len(edge_df) == 0:
+            return np.array([], dtype=int)
+
+        return edge_df.select(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET).to_numpy().ravel()
+
     @cache_method
     def node_ids(self) -> list[int]:
-        # if there are no edge filters, we can return the current node ids
-        if not self._edge_attr_comps and (not self._include_targets and not self._include_sources):
+        # Simple case: only node filters, no edge-based filtering
+        if not self._needs_edge_based_filtering():
             return self._current_node_ids()
 
-        # find nodes that are connected to edges that pass the edge filters
-        node_ids = []
-        edge_node_ids = (
-            self._edge_attrs()
-            .select(
-                DEFAULT_ATTR_KEYS.EDGE_SOURCE,
-                DEFAULT_ATTR_KEYS.EDGE_TARGET,
-            )
-            .to_numpy()
-            .ravel()
-        )
-        node_ids.append(edge_node_ids)
+        # Complex case: combine node and edge-based filtering
+        node_id_arrays = []
 
+        # Add nodes connected to edges that pass edge filters
+        edge_node_ids = self._get_edge_connected_node_ids()
+        if len(edge_node_ids) > 0:
+            node_id_arrays.append(edge_node_ids)
+
+        # Add nodes that pass node attribute filters
         if self._node_attr_comps:
-            # if there are node filters, we need to add the nodes that pass the node filters
-            node_ids.append(self._current_node_ids())
+            current_node_ids = self._current_node_ids()
+            if len(current_node_ids) > 0:
+                node_id_arrays.append(np.array(current_node_ids, dtype=int))
 
-        node_ids = [v for v in node_ids if len(v) > 0]
-
-        if len(node_ids) == 0:
+        # Combine and deduplicate
+        if not node_id_arrays:
             return []
 
-        node_ids = np.unique(np.concatenate(node_ids, dtype=int))
-        return node_ids.tolist()
+        combined_node_ids = np.concatenate(node_id_arrays)
+        return np.unique(combined_node_ids).tolist()
 
     @cache_method
     def _edge_attrs(self) -> pl.DataFrame:
@@ -324,6 +332,16 @@ class RustWorkXGraph(BaseGraph):
         include_targets: bool = False,
         include_sources: bool = False,
     ) -> RXFilter:
+        # Input validation - allow empty filter to return all nodes
+        # This is a valid use case for getting the full graph
+
+        if node_ids is not None:
+            # Validate node_ids exist in the graph
+            existing_ids = set(self.rx_graph.node_indices())
+            invalid_ids = [nid for nid in node_ids if nid not in existing_ids]
+            if invalid_ids:
+                raise ValueError(f"Invalid node_ids: {invalid_ids}. These nodes do not exist in the graph.")
+
         return RXFilter(
             *attr_filters,
             graph=self,
@@ -1558,6 +1576,16 @@ class IndexedRXGraph(RustWorkXGraph):
         include_sources: bool = False,
     ) -> RXFilter:
         from tracksdata.graph.filters._indexed_filter import IndexRXFilter
+
+        # Input validation - allow empty filter to return all nodes
+        # This is a valid use case for getting the full graph
+
+        if node_ids is not None:
+            # Validate node_ids exist in the graph (in world coordinates)
+            existing_world_ids = set(self.node_ids())
+            invalid_ids = [nid for nid in node_ids if nid not in existing_world_ids]
+            if invalid_ids:
+                raise ValueError(f"Invalid node_ids: {invalid_ids}. These nodes do not exist in the graph.")
 
         return IndexRXFilter(
             *attr_filters,
