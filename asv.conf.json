@@ -7,13 +7,13 @@
   "env_dir": ".asv/env",
   "results_dir": ".asv/results",
   "html_dir": ".asv/html",
-  "environment_type": "virtualenv",
+  "environment_type": "uv",
   "build_command": [],
   "pythons": [
     "3.12"
   ],
   "install_command": [
-    "python -mpip install ."
+    "uv sync"
   ],
   "matrix": {},
   "show_commit_url": "https://github.com/royerlab/tracksdata/commit/",
