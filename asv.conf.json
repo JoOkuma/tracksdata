@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "project": "tracksdata",
+  "project_url": "https://github.com/royerlab/tracksdata",
+  "repo": ".",
+  "benchmark_dir": "benchmarks",
+  "env_dir": ".asv/env",
+  "results_dir": ".asv/results",
+  "html_dir": ".asv/html",
+  "environment_type": "existing",
+  "pythons": [],
+  "matrix": {},
+  "show_commit_url": "https://github.com/royerlab/tracksdata/commit/",
+  "branches": [
+    "main"
+  ]
+}
