@@ -8,9 +8,7 @@
   "results_dir": ".asv/results",
   "html_dir": ".asv/html",
   "environment_type": "existing",
-  "pythons": [
-    "3.12"
-  ],
+  "pythons": [],
   "matrix": {},
   "show_commit_url": "https://github.com/royerlab/tracksdata/commit/",
   "branches": [

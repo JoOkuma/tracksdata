@@ -28,15 +28,7 @@ jobs:
       - name: Install benchmarking tooling
         run: |
           uv sync --extra benchmark
-          source .venv/bin/activate
-
-      - name: Cache ASV environments
-        uses: actions/cache@v4
-        with:
-          path: .asv/env
-          key: asv-env-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'asv.conf.json') }}
-          restore-keys: |
-            asv-env-${{ runner.os }}-py312-
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
 
       - name: Register ASV machine profile
         run: |
@@ -55,7 +47,7 @@ jobs:
           set -o pipefail
           asv continuous origin/main HEAD \
             --machine github-actions \
-            --python 3.12 \
+            --environment existing:${PWD}/.venv/bin/python \
             --show-stderr | tee asv-output.log
           tail -n 100 asv-output.log > asv-summary.txt
           {
