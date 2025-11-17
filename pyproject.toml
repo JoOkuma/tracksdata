@@ -72,6 +72,9 @@ docs = [
   "mkdocs-mermaid2-plugin",
   "mike",
 ]
+benchmark = [
+  "asv",
+]
 
 [project.urls]
 Documentation = "https://github.com/jookuma/tracksdata#readme"

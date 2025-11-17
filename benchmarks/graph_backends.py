@@ -17,7 +17,7 @@ NODE_SIZES = (1_000, 10_000, 100_000)
 WORKER_COUNTS = (1, 4)
 
 
-class SQLGraphWithMemory(_BaseSQLGraph):
+class SQLGraphInMemory(_BaseSQLGraph):
     def __init__(self) -> None:
         super().__init__(drivername="sqlite", database=":memory:", overwrite=True)
 
@@ -33,7 +33,7 @@ class SQLGraphDisk(_BaseSQLGraph):
 BACKENDS: dict[str, type[BaseGraph]] = {
     "RustWorkXGraph": RustWorkXGraph,
     "IndexedRXGraph": IndexedRXGraph,
-    "SQLGraphWithMemory": SQLGraphWithMemory,
+    "SQLGraphInMemory": SQLGraphInMemory,
     "SQLGraphDisk": SQLGraphDisk,
 }
 
@@ -76,6 +76,9 @@ class GraphBackendsBenchmark:
     """
     ASV benchmark suite that times each step of the graph-building pipeline per backend.
     """
+
+    rounds = 2
+    repeat = 3
 
     param_names = ("backend", "n_nodes", "n_workers")
     params = (tuple(BACKENDS), NODE_SIZES, WORKER_COUNTS)

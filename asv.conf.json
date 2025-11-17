@@ -7,13 +7,13 @@
   "env_dir": ".asv/env",
   "results_dir": ".asv/results",
   "html_dir": ".asv/html",
-  "environment_type": "uv",
-  "build_command": [],
+  "environment_type": "existing",
   "pythons": [
     "3.12"
   ],
   "install_command": [
-    "uv sync"
+    "uv sync --extra benchmark",
+    "source .venv/bin/activate"
   ],
   "matrix": {},
   "show_commit_url": "https://github.com/royerlab/tracksdata/commit/",
