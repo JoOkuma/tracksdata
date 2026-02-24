@@ -1,6 +1,7 @@
 """Tests for FilteredGeffLoader."""
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -8,8 +9,26 @@ import pytest
 from zarr.storage import MemoryStore
 
 from tracksdata.attrs import NodeAttr
-from tracksdata.graph import FilteredGeffLoader, IndexedRXGraph, RustWorkXGraph
 from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.graph import (
+    FilteredGeffLoader,
+    IndexedRXGraph,
+    RustWorkXGraph,
+    SQLGraph,
+)
+from tracksdata.graph._base_graph import BaseGraph
+
+
+@pytest.fixture(
+    params=[
+        (IndexedRXGraph, {}),
+        (RustWorkXGraph, {}),
+        (SQLGraph, {"drivername": "sqlite", "database": ":memory:"}),
+    ]
+)
+def graph_class_and_kwargs(request: pytest.FixtureRequest) -> tuple[type[BaseGraph], dict[str, Any]]:
+    """Fixture that provides graph class types for FilteredGeffLoader testing."""
+    return request.param
 
 
 def _create_test_geff(store: MemoryStore) -> None:
@@ -138,17 +157,19 @@ def test_empty_result() -> None:
     assert graph.num_edges() == 0
 
 
-def test_no_filters() -> None:
+def test_no_filters(graph_class_and_kwargs: tuple[type[BaseGraph], dict[str, Any]]) -> None:
     """Test loading without filters behaves like normal load."""
     store = MemoryStore()
     _create_test_geff(store)
 
+    graph_class, graph_kwargs = graph_class_and_kwargs
+
     # Load without filters
     loader = FilteredGeffLoader(store)
-    graph_filtered, _ = loader.load()
+    graph_filtered, _ = loader.load(graph_class=graph_class, **graph_kwargs)
 
     # Load normally for comparison
-    graph_full, _ = IndexedRXGraph.from_geff(store)
+    graph_full, _ = graph_class.from_geff(store, **graph_kwargs)
 
     # Should have same number of nodes and edges
     assert graph_filtered.num_nodes() == graph_full.num_nodes()
@@ -175,16 +196,24 @@ def test_equivalence_with_full_load() -> None:
     assert graph_filtered.num_nodes() == ref.num_nodes()
     assert graph_filtered.num_edges() == ref.num_edges()
 
-    # Compare node attributes
+    # Compare node attributes including node_id
     ref_attrs = ref.node_attrs().sort(DEFAULT_ATTR_KEYS.NODE_ID)
     filtered_attrs = graph_filtered.node_attrs().sort(DEFAULT_ATTR_KEYS.NODE_ID)
 
     # edge ids are not guaranteed to be the exact same
-    ref_edge_attrs = ref.edge_attrs().drop(DEFAULT_ATTR_KEYS.EDGE_ID).sort(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET)
-    filtered_edge_attrs = graph_filtered.edge_attrs().drop(DEFAULT_ATTR_KEYS.EDGE_ID).sort(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET)
+    ref_edge_attrs = (
+        ref.edge_attrs()
+        .drop(DEFAULT_ATTR_KEYS.EDGE_ID)
+        .sort(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET)
+    )
+    filtered_edge_attrs = (
+        graph_filtered.edge_attrs()
+        .drop(DEFAULT_ATTR_KEYS.EDGE_ID)
+        .sort(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET)
+    )
 
-    assert ref_attrs.equals(filtered_attrs)
     assert ref_edge_attrs.equals(filtered_edge_attrs)
+    assert ref_attrs.equals(filtered_attrs)
 
 
 def test_all_nodes_match() -> None:
@@ -267,19 +296,21 @@ def test_with_tmp_path(tmp_path: Path) -> None:
     assert set(times) == {2, 3, 4}
 
 
-def test_graph_class_parameter() -> None:
+def test_graph_class_parameter(graph_class_and_kwargs: tuple[type[BaseGraph], dict[str, Any]]) -> None:
     """Test loading into different graph classes."""
     store = MemoryStore()
     _create_test_geff(store)
 
-    # Load as IndexedRXGraph (default)
+    graph_class, graph_kwargs = graph_class_and_kwargs
+
+    # Load with specified graph class
     loader = FilteredGeffLoader(
         store,
         node_filters=[NodeAttr("t") < 3],
     )
-    graph, _ = loader.load(graph_class=RustWorkXGraph)
+    graph, _ = loader.load(graph_class=graph_class, **graph_kwargs)
 
-    assert isinstance(graph, RustWorkXGraph)
+    assert isinstance(graph, graph_class)
     assert graph.num_nodes() == 9
 
 
