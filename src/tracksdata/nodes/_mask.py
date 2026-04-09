@@ -67,13 +67,18 @@ class Mask:
     def __getstate__(self) -> dict:
         data_dict = self.__dict__.copy()
         prev_nthreads = blosc2.set_nthreads(1)
-        data_dict["_mask"] = blosc2.pack_array2(self._mask)
+        # Bypass blosc2 printing overhead by directly creating a schunk and converting it to cframe,
+        # instead of using blosc2.pack_tensor
+        schunk = blosc2.SChunk(data=self._mask)
+        dtype = self._mask.dtype.descr if self._mask.dtype.kind == "V" else self._mask.dtype.str
+        schunk.vlmeta["__pack_tensor__"] = ("numpy", self._mask.shape, dtype)
+        data_dict["_mask"] = schunk.to_cframe()
         blosc2.set_nthreads(prev_nthreads)
         return data_dict
 
     def __setstate__(self, state: dict) -> None:
         prev_nthreads = blosc2.set_nthreads(1)
-        state["_mask"] = blosc2.unpack_array2(state["_mask"])
+        state["_mask"] = blosc2.unpack_tensor(state["_mask"])
         blosc2.set_nthreads(prev_nthreads)
         self.__dict__.update(state)
 
@@ -177,14 +182,34 @@ class Mask:
         offset : NDArray[np.integer] | int, optional
             The offset to add to the indices, should be used with bounding box information.
         """
-        if isinstance(offset, int):
-            offset = np.full(self._mask.ndim, offset)
+        ndim = self._mask.ndim
+        bbox = self._bbox
+        shape = buffer.shape
 
-        window = tuple(
-            slice(i + o, j + o)
-            for i, j, o in zip(self._bbox[: self._mask.ndim], self._bbox[self._mask.ndim :], offset, strict=True)
+        if isinstance(offset, int):
+            starts = [int(bbox[i]) + offset for i in range(ndim)]
+            stops = [int(bbox[i + ndim]) + offset for i in range(ndim)]
+        else:
+            starts = [int(bbox[i]) + int(offset[i]) for i in range(ndim)]
+            stops = [int(bbox[i + ndim]) + int(offset[i]) for i in range(ndim)]
+
+        # fast path: bbox fully inside buffer — no numpy allocations
+        if all(starts[i] >= 0 and stops[i] <= shape[i] for i in range(ndim)):
+            buffer[tuple(slice(starts[i], stops[i]) for i in range(ndim))][self._mask] = value
+            return
+
+        # if bboxes falls outside buffer, clip to buffer bounds
+        clipped_start = [max(0, starts[i]) for i in range(ndim)]
+        clipped_stop = [min(shape[i], stops[i]) for i in range(ndim)]
+
+        if any(clipped_stop[i] <= clipped_start[i] for i in range(ndim)):
+            return
+
+        mask_slicing = tuple(
+            slice(clipped_start[i] - starts[i], self._mask.shape[i] - (stops[i] - clipped_stop[i])) for i in range(ndim)
         )
-        buffer[window][self._mask] = value
+        window = tuple(slice(clipped_start[i], clipped_stop[i]) for i in range(ndim))
+        buffer[window][self._mask[mask_slicing]] = value
 
     def iou(self, other: "Mask") -> float:
         """

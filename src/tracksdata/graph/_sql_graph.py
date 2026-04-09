@@ -485,6 +485,8 @@ class SQLGraph(BaseGraph):
 
         self._max_id_per_time = {}
         self._update_max_id_per_time()
+        self._node_attr_schemas_cache: dict | None = None
+        self._edge_attr_schemas_cache: dict | None = None
 
     def supports_custom_indices(self) -> bool:
         return True
@@ -607,12 +609,14 @@ class SQLGraph(BaseGraph):
 
     @property
     def __node_attr_schemas(self) -> dict[str, AttrSchema]:
-        return self._attr_schemas_from_metadata(
-            table_class=self.Node,
-            metadata_key=self._PRIVATE_SQL_NODE_SCHEMA_STORE_KEY,
-            default_schemas=self._default_node_attr_schemas(),
-            preferred_order=[DEFAULT_ATTR_KEYS.T, DEFAULT_ATTR_KEYS.NODE_ID],
-        )
+        if self._node_attr_schemas_cache is None:
+            self._node_attr_schemas_cache = self._attr_schemas_from_metadata(
+                table_class=self.Node,
+                metadata_key=self._PRIVATE_SQL_NODE_SCHEMA_STORE_KEY,
+                default_schemas=self._default_node_attr_schemas(),
+                preferred_order=[DEFAULT_ATTR_KEYS.T, DEFAULT_ATTR_KEYS.NODE_ID],
+            )
+        return self._node_attr_schemas_cache
 
     @__node_attr_schemas.setter
     def __node_attr_schemas(self, schemas: dict[str, AttrSchema]) -> None:
@@ -621,19 +625,22 @@ class SQLGraph(BaseGraph):
         schemas = merged_schemas
         encoded_schemas = {key: serialize_attr_schema(schema) for key, schema in schemas.items()}
         self._private_metadata[self._PRIVATE_SQL_NODE_SCHEMA_STORE_KEY] = encoded_schemas
+        self._node_attr_schemas_cache = None
 
     @property
     def __edge_attr_schemas(self) -> dict[str, AttrSchema]:
-        return self._attr_schemas_from_metadata(
-            table_class=self.Edge,
-            metadata_key=self._PRIVATE_SQL_EDGE_SCHEMA_STORE_KEY,
-            default_schemas=self._default_edge_attr_schemas(),
-            preferred_order=[
-                DEFAULT_ATTR_KEYS.EDGE_ID,
-                DEFAULT_ATTR_KEYS.EDGE_SOURCE,
-                DEFAULT_ATTR_KEYS.EDGE_TARGET,
-            ],
-        )
+        if self._edge_attr_schemas_cache is None:
+            self._edge_attr_schemas_cache = self._attr_schemas_from_metadata(
+                table_class=self.Edge,
+                metadata_key=self._PRIVATE_SQL_EDGE_SCHEMA_STORE_KEY,
+                default_schemas=self._default_edge_attr_schemas(),
+                preferred_order=[
+                    DEFAULT_ATTR_KEYS.EDGE_ID,
+                    DEFAULT_ATTR_KEYS.EDGE_SOURCE,
+                    DEFAULT_ATTR_KEYS.EDGE_TARGET,
+                ],
+            )
+        return self._edge_attr_schemas_cache
 
     @__edge_attr_schemas.setter
     def __edge_attr_schemas(self, schemas: dict[str, AttrSchema]) -> None:
@@ -642,6 +649,7 @@ class SQLGraph(BaseGraph):
         schemas = merged_schemas
         encoded_schemas = {key: serialize_attr_schema(schema) for key, schema in schemas.items()}
         self._private_metadata[self._PRIVATE_SQL_EDGE_SCHEMA_STORE_KEY] = encoded_schemas
+        self._edge_attr_schemas_cache = None
 
     def _restore_pickled_column_types(self, table: sa.Table) -> None:
         for column in table.columns:
@@ -1920,14 +1928,18 @@ class SQLGraph(BaseGraph):
             )
 
         self._update_table(self.Node, node_ids, DEFAULT_ATTR_KEYS.NODE_ID, attrs)
-        new_df = self.filter(node_ids=updated_node_ids).node_attrs(attr_keys=[DEFAULT_ATTR_KEYS.NODE_ID, *attr_keys])
-        new_attrs_by_id = new_df.rows_by_key(key=DEFAULT_ATTR_KEYS.NODE_ID, named=True, unique=True, include_key=True)
 
         if is_signal_on(self.node_updated):
+            new_df = self.filter(node_ids=updated_node_ids).node_attrs(
+                attr_keys=[DEFAULT_ATTR_KEYS.NODE_ID, *attr_keys]
+            )
+            new_attrs_by_id = new_df.rows_by_key(
+                key=DEFAULT_ATTR_KEYS.NODE_ID, named=True, unique=True, include_key=True
+            )
+
             for node_id in updated_node_ids:
                 self.node_updated.emit(node_id, old_attrs_by_id[node_id], new_attrs_by_id[node_id])
 
-        if is_signal_on(self.node_updated):
             new_df = self.filter(node_ids=updated_node_ids).node_attrs(
                 attr_keys=[DEFAULT_ATTR_KEYS.NODE_ID, *attr_keys]
             )
@@ -2012,6 +2024,15 @@ class SQLGraph(BaseGraph):
         Get the out-degree of a list of nodes.
         """
         return self._get_degree(node_ids, DEFAULT_ATTR_KEYS.EDGE_SOURCE)
+
+    def dividing_nodes(self) -> list[int]:
+        """
+        Get the node ids of dividing nodes (nodes with out-degree == 2).
+        """
+        edge_key_col = getattr(self.Edge, DEFAULT_ATTR_KEYS.EDGE_SOURCE)
+        stmt = sa.select(edge_key_col).group_by(edge_key_col).having(sa.func.count() == 2)
+        with Session(self._engine) as session:
+            return [int(row[0]) for row in session.execute(stmt).all()]
 
     def __getstate__(self) -> dict:
         data_dict = self.__dict__.copy()

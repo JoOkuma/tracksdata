@@ -510,7 +510,30 @@ class GraphView(MappedGraphMixin, RustWorkXGraph):
         return parent_edge_id
 
     def bulk_add_edges(self, edges: list[dict[str, Any]], return_ids: bool = False) -> list[int] | None:
-        return BaseGraph.bulk_add_edges(self, edges, return_ids=return_ids)
+        # Capture source/target before _root.bulk_add_edges pops them from edge dicts
+        source_ids = [edge[DEFAULT_ATTR_KEYS.EDGE_SOURCE] for edge in edges]
+        target_ids = [edge[DEFAULT_ATTR_KEYS.EDGE_TARGET] for edge in edges]
+
+        # Always request ids — needed to build _edge_map_to_root
+        parent_edge_ids = self._root.bulk_add_edges(edges=edges, return_ids=True)
+
+        if self.sync:
+            for edge, source_id, target_id, parent_edge_id in zip(
+                edges, source_ids, target_ids, parent_edge_ids, strict=True
+            ):
+                # RustWorkXGraph sets EDGE_ID in the dict; SQLGraph does not — set explicitly
+                edge[DEFAULT_ATTR_KEYS.EDGE_ID] = parent_edge_id
+                edge_id = self.rx_graph.add_edge(
+                    self._map_to_local(source_id),
+                    self._map_to_local(target_id),
+                    edge,
+                )
+                self._edge_map_to_root.put(edge_id, parent_edge_id)
+        else:
+            self._out_of_sync = True
+
+        if return_ids:
+            return parent_edge_ids
 
     def remove_edge(
         self,
@@ -662,10 +685,28 @@ class GraphView(MappedGraphMixin, RustWorkXGraph):
         else:
             node_ids = list(node_ids)
 
-        if is_signal_on(self.node_updated):
-            old_attrs_by_id = self._root.filter(node_ids=node_ids).node_attrs()
-            old_attrs_by_id = old_attrs_by_id.rows_by_key(
-                key=DEFAULT_ATTR_KEYS.NODE_ID, named=True, unique=True, include_key=True
+        signal_on = is_signal_on(self.node_updated)
+        if signal_on:
+            existing_keys = set(self._root.node_attr_keys(return_ids=True))
+            signal_keys = list(
+                dict.fromkeys(
+                    k
+                    for k in [
+                        DEFAULT_ATTR_KEYS.NODE_ID,
+                        DEFAULT_ATTR_KEYS.T,
+                        DEFAULT_ATTR_KEYS.Z,
+                        DEFAULT_ATTR_KEYS.Y,
+                        DEFAULT_ATTR_KEYS.X,
+                        DEFAULT_ATTR_KEYS.BBOX,
+                        *attrs.keys(),
+                    ]
+                    if k in existing_keys
+                )
+            )
+            old_attrs_by_id = (
+                self._root.filter(node_ids=node_ids)
+                .node_attrs(attr_keys=signal_keys)
+                .rows_by_key(key=DEFAULT_ATTR_KEYS.NODE_ID, named=True, unique=True, include_key=True)
             )
 
         self._root.update_node_attrs(
@@ -683,13 +724,18 @@ class GraphView(MappedGraphMixin, RustWorkXGraph):
             else:
                 self._out_of_sync = True
 
-        if is_signal_on(self.node_updated):
+        if signal_on:
+            new_attrs_by_id = (
+                self._root.filter(node_ids=node_ids)
+                .node_attrs(attr_keys=signal_keys)
+                .rows_by_key(key=DEFAULT_ATTR_KEYS.NODE_ID, named=True, unique=True, include_key=True)
+            )
+            old_attrs_by_id = cast(dict[int, dict[str, Any]], old_attrs_by_id)  # for mypy
             for node_id in node_ids:
-                old_attrs_by_id = cast(dict[int, dict[str, Any]], old_attrs_by_id)  # for mypy
                 self.node_updated.emit(
                     node_id,
                     old_attrs_by_id[node_id],
-                    self._root.nodes[node_id].to_dict(),
+                    new_attrs_by_id[node_id],
                 )
 
     def update_edge_attrs(
@@ -736,6 +782,12 @@ class GraphView(MappedGraphMixin, RustWorkXGraph):
         if isinstance(node_ids, int):
             return rx_graph.out_degree(self._map_to_local(node_ids))
         return [rx_graph.out_degree(self._map_to_local(node_id)) for node_id in node_ids]
+
+    def dividing_nodes(self) -> list[int]:
+        """
+        Get the node ids of dividing nodes (nodes with out-degree == 2).
+        """
+        return self._map_to_external(super().dividing_nodes())
 
     def _replace_parent_graph_with_root(self) -> None:
         """
