@@ -1,5 +1,6 @@
 """Memory-efficient GEFF loader with pre-filtering support."""
 
+import copy
 import operator
 from typing import Any
 
@@ -23,7 +24,7 @@ class FilteredGeffLoader:
     Filters GEFF data before loading into memory by:
     1. Reading only filter attribute zarr arrays to identify matching nodes
     2. Creating boolean masks for nodes and edges
-    3. Loading only the filtered subset via GeffReader.build()
+    3. Loading only the filtered subset using integer-indexed zarr reads
 
     This is significantly more I/O and runtime efficient than loading the entire
     graph and then filtering, especially for large datasets.
@@ -45,22 +46,13 @@ class FilteredGeffLoader:
 
     >>> from tracksdata.graph import FilteredGeffLoader
     >>> from tracksdata.attrs import NodeAttr
-    >>> loader = FilteredGeffLoader(
-    ...     "data.geff",
-    ...     node_filters=[NodeAttr("t") >= 10, NodeAttr("t") < 20]
-    ... )
+    >>> loader = FilteredGeffLoader("data.geff", node_filters=[NodeAttr("t") >= 10, NodeAttr("t") < 20])
     >>> graph, metadata = loader.load()
 
     Load specific properties only:
 
-    >>> loader = FilteredGeffLoader(
-    ...     "data.geff",
-    ...     node_filters=[NodeAttr("t").is_in([5, 10, 15])]
-    ... )
-    >>> graph, metadata = loader.load(
-    ...     node_props=["t", "x", "y"],
-    ...     edge_props=["distance"]
-    ... )
+    >>> loader = FilteredGeffLoader("data.geff", node_filters=[NodeAttr("t").is_in([5, 10, 15])])
+    >>> graph, metadata = loader.load(node_props=["t", "x", "y"], edge_props=["distance"])
     """
 
     def __init__(
@@ -74,8 +66,17 @@ class FilteredGeffLoader:
         self.validate = validate
         self.node_filters = node_filters or []
 
-        # Read metadata to know available properties
-        self.metadata = GeffMetadata.read(geff_store)
+        # Create and cache a GeffReader (pay validation cost once)
+        self._reader = GeffReader(geff_store, validate=validate)
+        self.metadata = self._reader.metadata
+
+        # Cache all zarr property references (lightweight, just zarr array refs)
+        self._reader.read_node_props(None)
+        self._reader.read_edge_props(None)
+
+        # Cache node IDs and edge IDs in memory (small arrays, always needed)
+        self._node_ids: NDArray = np.asarray(self._reader.nodes[:])
+        self._edge_ids: NDArray = np.asarray(self._reader.edges[:])
 
     def _get_required_node_props(self) -> set[str]:
         """Extract property names needed for node filtering."""
@@ -99,33 +100,132 @@ class FilteredGeffLoader:
         if not self.node_filters:
             return None
 
-        # Read minimal properties needed for filtering
+        # Read minimal properties needed for filtering using cached zarr refs
         filter_prop_names = self._get_required_node_props()
-        reader = GeffReader(self.geff_store, validate=self.validate)
-        reader.read_node_props(filter_prop_names)
 
-        # Build DataFrame from zarr arrays (load to memory for filtering)
         temp_data = {}
         for prop in filter_prop_names:
-            zarr_prop = reader.node_props[prop]
-            prop_metadata = reader.metadata.node_props_metadata[prop]
-            in_memory = reader._load_prop_to_memory(zarr_prop, None, prop_metadata)
+            zarr_prop = self._reader.node_props[prop]
+            prop_metadata = self._reader.metadata.node_props_metadata[prop]
+            in_memory = self._reader._load_prop_to_memory(zarr_prop, None, prop_metadata)
             temp_data[prop] = in_memory["values"]
 
         df = pl.DataFrame(temp_data)
 
-        # Apply filter conditions - use pl.col for expressions, not df[...]
-        # polars_reduce_attr_comps needs Expr, not Series
+        # Apply filter conditions
         mask_expressions = []
         for attr_comp in self.node_filters:
             col_expr = pl.col(str(attr_comp.column))
             mask_expressions.append(attr_comp.op(col_expr, attr_comp.other))
 
-        # Combine with AND logic
         mask_expr = pl.reduce(operator.and_, mask_expressions)
         mask = df.select(mask_expr).to_series().to_numpy()
 
         return mask
+
+    @staticmethod
+    def _load_zarr_by_indices(
+        zarr_arr: Any,
+        indices: NDArray[np.intp] | None,
+        dtype: type | None = None,
+    ) -> NDArray:
+        """Load zarr array subset using integer indices (faster than bool masks for sparse selections)."""
+        if indices is None:
+            data = zarr_arr[:]
+        elif len(indices) == 0:
+            shape = (0, *zarr_arr.shape[1:])
+            return np.empty(shape, dtype=dtype or zarr_arr.dtype)
+        else:
+            data = zarr_arr.oindex[indices]
+        return np.asarray(data, dtype=dtype) if dtype else np.asarray(data)
+
+    def _build_filtered(
+        self,
+        node_mask: NDArray[np.bool_] | None,
+        node_props_names: list[str],
+        edge_props_names: list[str],
+    ) -> dict[str, Any]:
+        """
+        Build in-memory GEFF dict using integer-indexed zarr reads.
+
+        Uses integer indices instead of boolean masks for zarr access,
+        which is significantly faster for sparse selections.
+        """
+        reader = self._reader
+
+        if node_mask is not None:
+            node_indices = np.where(node_mask)[0]
+            nodes = self._node_ids[node_mask]
+        else:
+            node_indices = None
+            nodes = self._node_ids
+
+        # Load node props with integer indices (fast zarr access)
+        node_props: dict[str, dict] = {}
+        for name in node_props_names:
+            zarr_prop = reader.node_props[name]
+            prop_metadata = reader.metadata.node_props_metadata[name]
+            if prop_metadata.varlength:
+                # varlength needs special deserialization via _load_prop_to_memory
+                node_props[name] = reader._load_prop_to_memory(zarr_prop, node_mask, prop_metadata)
+            else:
+                values = self._load_zarr_by_indices(zarr_prop["values"], node_indices)
+                missing = None
+                if "missing" in zarr_prop:
+                    missing = self._load_zarr_by_indices(zarr_prop["missing"], node_indices, dtype=bool)
+                node_props[name] = {"values": values, "missing": missing}
+
+        # Filter edges using cached edge IDs
+        edges = self._edge_ids
+        if node_mask is not None and len(edges) > 0 and len(nodes) > 0:
+            # Lookup array for fast edge filtering
+            max_id = int(max(edges.max(), nodes.max())) + 1
+            lookup = np.zeros(max_id, dtype=bool)
+            lookup[nodes] = True
+            edge_mask = lookup[edges[:, 0]] & lookup[edges[:, 1]]
+            edge_indices = np.where(edge_mask)[0]
+            edges = edges[edge_mask]
+        elif node_mask is not None:
+            # No nodes or no edges: empty result
+            edge_mask = None
+            edge_indices = np.array([], dtype=np.intp)
+            edges = np.empty((0, 2), dtype=self._edge_ids.dtype)
+        else:
+            edge_mask = None
+            edge_indices = None
+
+        # Load edge props with integer indices
+        edge_props: dict[str, dict] = {}
+        for name in edge_props_names:
+            zarr_prop = reader.edge_props[name]
+            prop_metadata = reader.metadata.edge_props_metadata[name]
+            if prop_metadata.varlength:
+                edge_props[name] = reader._load_prop_to_memory(zarr_prop, edge_mask, prop_metadata)
+            else:
+                values = self._load_zarr_by_indices(zarr_prop["values"], edge_indices)
+                missing = None
+                if "missing" in zarr_prop:
+                    missing = self._load_zarr_by_indices(zarr_prop["missing"], edge_indices, dtype=bool)
+                edge_props[name] = {"values": values, "missing": missing}
+
+        # Clean metadata: remove properties not loaded
+        output_metadata = copy.deepcopy(reader.metadata)
+        node_props_set = set(node_props_names)
+        edge_props_set = set(edge_props_names)
+        for prop in list(output_metadata.node_props_metadata.keys()):
+            if prop not in node_props_set:
+                del output_metadata.node_props_metadata[prop]
+        for prop in list(output_metadata.edge_props_metadata.keys()):
+            if prop not in edge_props_set:
+                del output_metadata.edge_props_metadata[prop]
+
+        return {
+            "metadata": output_metadata,
+            "node_ids": nodes,
+            "node_props": node_props,
+            "edge_ids": edges,
+            "edge_props": edge_props,
+        }
 
     def load(
         self,
@@ -162,15 +262,12 @@ class FilteredGeffLoader:
         # Create node mask BEFORE loading data
         node_mask = self._create_node_mask()
 
-        # Use GeffReader with node mask
-        # Note: GeffReader.build() automatically filters edges where both endpoints
-        # are in the filtered node set
-        reader = GeffReader(self.geff_store, validate=self.validate)
-        reader.read_node_props(node_props)
-        reader.read_edge_props(edge_props)
+        # Resolve property names (preserve order for deterministic column ordering)
+        node_props_names = list(node_props) if node_props is not None else list(self._reader.node_prop_names)
+        edge_props_names = list(edge_props) if edge_props is not None else list(self._reader.edge_prop_names)
 
-        # Build loads ONLY filtered data (nodes + incident edges)
-        in_memory_geff = reader.build(node_mask=node_mask)
+        # Build filtered data using fast integer-indexed reads
+        in_memory_geff = self._build_filtered(node_mask, node_props_names, edge_props_names)
 
         # Construct graph using geff backend
         rx_graph = geff.construct(
