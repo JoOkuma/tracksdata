@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 import polars as pl
 from ilpy import (
@@ -17,6 +19,9 @@ from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.graph._graph_view import GraphView
 from tracksdata.solvers._base_solver import BaseSolver
 from tracksdata.utils._logging import LOG
+
+if TYPE_CHECKING:
+    import motile
 
 
 class ILPSolver(BaseSolver):
@@ -434,3 +439,174 @@ class ILPSolver(BaseSolver):
                 NodeAttr(self.output_key) == True,
                 EdgeAttr(self.output_key) == True,
             ).subgraph()
+
+    def to_motile_solver(self, graph: BaseGraph) -> "motile.Solver":
+        """
+        Build an equivalent [`motile.Solver`](https://funkelab.github.io/motile/) for ``graph``.
+
+        The weight expressions of this solver are evaluated into per-node and per-edge
+        costs, attached to a [`motile.TrackGraph`][tracksdata.functional.to_motile_graph],
+        and mapped to `motile` costs and constraints:
+
+        - ``node_weight`` -> `NodeSelection`
+        - ``edge_weight`` -> `EdgeSelection`
+        - ``appearance_weight`` -> `Appear`
+        - ``disappearance_weight`` -> `Disappear`
+        - ``division_weight`` -> `Split` (with `MaxChildren(2)`)
+        - ``merge_weight`` -> `Merge` (with `MaxParents(2)`), when enabled
+        - graph overlaps -> `ExclusiveNodes`
+        - ``+/-inf`` node/edge weights -> `Pin`
+
+        The two formulations differ in their constraints but produce equivalent
+        solutions. Note that, unlike this solver, `motile` does not charge an
+        appearance cost in the first frame nor a disappearance cost in the last frame.
+
+        Parameters
+        ----------
+        graph : BaseGraph
+            The graph to build the `motile` solver for.
+
+        Returns
+        -------
+        motile.Solver
+            A `motile` solver equivalent to this `ILPSolver`.
+
+        Examples
+        --------
+        ```python
+        solver = ILPSolver(edge_weight="distance", appearance_weight=1.0)
+        motile_solver = solver.to_motile_solver(graph)
+        solution = motile_solver.solve()
+        ```
+        """
+        try:
+            import motile
+            from motile.constraints import ExclusiveNodes, MaxChildren, MaxParents, Pin
+            from motile.costs import (
+                Appear,
+                Disappear,
+                EdgeSelection,
+                Merge,
+                NodeSelection,
+                Split,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "`motile` is required for `ILPSolver.to_motile_solver`.\nPlease install it with `pip install motile`."
+            ) from e
+
+        from tracksdata.functional._motile import to_motile_graph
+
+        # attribute keys used to store the evaluated costs on the motile graph
+        node_cost_key = "_node_cost"
+        edge_cost_key = "_edge_cost"
+        appear_cost_key = "_appear_cost"
+        disappear_cost_key = "_disappear_cost"
+        division_cost_key = "_division_cost"
+        merge_cost_key = "_merge_cost"
+        pin_key = "_pin"
+
+        # motile only pins node/edge selection, not the appear/disappear/division/merge
+        # indicators, so reject those pins instead of silently dropping them.
+        for name, expr in [
+            ("appearance_weight", self.appearance_weight_expr),
+            ("disappearance_weight", self.disappearance_weight_expr),
+            ("division_weight", self.division_weight_expr),
+            ("merge_weight", self.merge_weight_expr),
+        ]:
+            if expr is not None and (expr.inf_exprs or expr.neg_inf_exprs):
+                raise NotImplementedError(
+                    f"Pinning (`+/-inf`) `{name}` expressions cannot be converted to a motile solver."
+                )
+
+        node_attr_keys = [
+            DEFAULT_ATTR_KEYS.NODE_ID,
+            DEFAULT_ATTR_KEYS.T,
+            *self.node_weight_expr.columns,
+            *self.appearance_weight_expr.columns,
+            *self.disappearance_weight_expr.columns,
+            *self.division_weight_expr.columns,
+        ]
+        if self.merge_weight_expr is not None:
+            node_attr_keys.extend(self.merge_weight_expr.columns)
+
+        nodes_df = graph.node_attrs(attr_keys=list(dict.fromkeys(node_attr_keys)))
+
+        edge_attr_keys = [] if graph.num_edges() == 0 else self.edge_weight_expr.columns
+        edges_df = graph.edge_attrs(attr_keys=edge_attr_keys)
+
+        # build the structural motile graph (only frame attribute is needed structurally)
+        track_graph = to_motile_graph(graph, node_attr_keys=[], edge_attr_keys=[])
+
+        # evaluate cost expressions and overlay them onto the motile graph
+        node_costs = self._evaluate_expr(self.node_weight_expr, nodes_df)
+        appear_costs = self._evaluate_expr(self.appearance_weight_expr, nodes_df)
+        disappear_costs = self._evaluate_expr(self.disappearance_weight_expr, nodes_df)
+        division_costs = self._evaluate_expr(self.division_weight_expr, nodes_df)
+        merge_costs = (
+            self._evaluate_expr(self.merge_weight_expr, nodes_df) if self.merge_weight_expr is not None else None
+        )
+
+        node_id_key = DEFAULT_ATTR_KEYS.NODE_ID
+        node_pin: dict[int, bool] = {}
+        for node_id in self._evaluate_inf_expr(self.node_weight_expr.neg_inf_exprs, nodes_df, node_id_key):
+            node_pin[node_id] = True
+        for node_id in self._evaluate_inf_expr(self.node_weight_expr.inf_exprs, nodes_df, node_id_key):
+            node_pin[node_id] = False
+
+        node_ids = nodes_df[DEFAULT_ATTR_KEYS.NODE_ID].to_list()
+        for i, node_id in enumerate(node_ids):
+            data = track_graph.nodes[node_id]
+            data[node_cost_key] = node_costs[i]
+            data[appear_cost_key] = appear_costs[i]
+            data[disappear_cost_key] = disappear_costs[i]
+            data[division_cost_key] = division_costs[i]
+            if merge_costs is not None:
+                data[merge_cost_key] = merge_costs[i]
+            if node_id in node_pin:
+                data[pin_key] = node_pin[node_id]
+
+        has_edge_pins = False
+        if graph.num_edges() > 0:
+            edge_costs = self._evaluate_expr(self.edge_weight_expr, edges_df)
+
+            edge_pin: dict[int, bool] = {}
+            for edge_id in self._evaluate_inf_expr(
+                self.edge_weight_expr.neg_inf_exprs, edges_df, DEFAULT_ATTR_KEYS.EDGE_ID
+            ):
+                edge_pin[edge_id] = True
+            for edge_id in self._evaluate_inf_expr(
+                self.edge_weight_expr.inf_exprs, edges_df, DEFAULT_ATTR_KEYS.EDGE_ID
+            ):
+                edge_pin[edge_id] = False
+            has_edge_pins = bool(edge_pin)
+
+            edge_ids = edges_df[DEFAULT_ATTR_KEYS.EDGE_ID].to_list()
+            sources = edges_df[DEFAULT_ATTR_KEYS.EDGE_SOURCE].to_list()
+            targets = edges_df[DEFAULT_ATTR_KEYS.EDGE_TARGET].to_list()
+            for i, edge_id in enumerate(edge_ids):
+                data = track_graph.edges[(sources[i], targets[i])]
+                data[edge_cost_key] = edge_costs[i]
+                if edge_id in edge_pin:
+                    data[pin_key] = edge_pin[edge_id]
+
+        solver = motile.Solver(track_graph)
+        solver.add_cost(NodeSelection(weight=1.0, attribute=node_cost_key))
+        solver.add_cost(EdgeSelection(weight=1.0, attribute=edge_cost_key))
+        solver.add_cost(Appear(weight=1.0, attribute=appear_cost_key, constant=0.0))
+        solver.add_cost(Disappear(weight=1.0, attribute=disappear_cost_key, constant=0.0))
+        solver.add_cost(Split(weight=1.0, attribute=division_cost_key))
+        if merge_costs is not None:
+            solver.add_cost(Merge(weight=1.0, attribute=merge_cost_key))
+
+        # divisions are always part of the formulation, merges only when enabled
+        solver.add_constraint(MaxChildren(2))
+        solver.add_constraint(MaxParents(2 if self.merge_weight_expr is not None else 1))
+
+        if graph.has_overlaps():
+            solver.add_constraint(ExclusiveNodes(graph.overlaps()))
+
+        if node_pin or has_edge_pins:
+            solver.add_constraint(Pin(pin_key))
+
+        return solver
