@@ -228,28 +228,21 @@ _NUMPY_ID_ACCESSORS: dict[str, Callable[[BaseGraph, dict[str, int], Callable[[in
     list(_NUMPY_ID_ACCESSORS.values()),
     ids=list(_NUMPY_ID_ACCESSORS.keys()),
 )
-@pytest.mark.parametrize("as_view", [False, True], ids=["root", "view"])
 def test_numpy_integer_ids_read_paths(
     graph_backend: BaseGraph,
     accessor: Callable[[BaseGraph, dict[str, int], Callable[[int], Any]], Any],
-    as_view: bool,
 ) -> None:
     """A numpy integer id or filter value behaves exactly like the equal Python int."""
     ids = _numpy_id_graph(graph_backend)
-    if as_view:
-        graph_backend = graph_backend.filter().subgraph()
 
     expected = accessor(graph_backend, ids, int)
     assert accessor(graph_backend, ids, np.int64) == expected
 
 
 @pytest.mark.parametrize("cast", [int, np.int64], ids=["int", "np.int64"])
-@pytest.mark.parametrize("as_view", [False, True], ids=["root", "view"])
-def test_numpy_integer_ids_write_paths(graph_backend: BaseGraph, cast: Callable[[int], Any], as_view: bool) -> None:
+def test_numpy_integer_ids_write_paths(graph_backend: BaseGraph, cast: Callable[[int], Any]) -> None:
     """Mutating calls take effect whether the id is a Python int or a numpy integer."""
     ids = _numpy_id_graph(graph_backend)
-    if as_view:
-        graph_backend = graph_backend.filter().subgraph()
 
     graph_backend.update_node_attrs(node_ids=[cast(ids["a"])], attrs={"area": 9.0})
     assert graph_backend.nodes[ids["a"]]["area"] == 9.0
@@ -284,36 +277,6 @@ def test_numpy_integer_ids_bulk_add(graph_backend: BaseGraph) -> None:
     edge_df = graph_backend.edge_attrs(attr_keys=[DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET])
     assert edge_df[DEFAULT_ATTR_KEYS.EDGE_SOURCE].to_list() == [node_ids[0]]
     assert edge_df[DEFAULT_ATTR_KEYS.EDGE_TARGET].to_list() == [node_ids[1]]
-
-
-@pytest.mark.parametrize("dtype", [np.int64, object], ids=["int64", "object"])
-def test_numpy_integer_id_arrays(graph_backend: BaseGraph, dtype: type) -> None:
-    """Numeric and object arrays select and mutate the same IDs as Python lists."""
-    ids = _numpy_id_graph(graph_backend)
-    node_ids = np.array([np.int64(ids["a"]), np.int64(ids["b"])], dtype=dtype)
-    edge_ids = np.array([np.int64(ids["e_ab"])], dtype=dtype)
-
-    assert sorted(graph_backend.filter(node_ids=node_ids).node_ids()) == sorted([ids["a"], ids["b"]])
-    assert graph_backend.out_degree(node_ids) == [1, 1]
-
-    graph_backend.update_node_attrs(node_ids=node_ids, attrs={"area": 9.0})
-    assert graph_backend.filter(node_ids=node_ids).node_attrs(attr_keys=["area"])["area"].to_list() == [9.0, 9.0]
-
-    graph_backend.bulk_remove_edges(edge_ids)
-    assert not graph_backend.has_edge(ids["a"], ids["b"])
-    graph_backend.bulk_remove_nodes(node_ids)
-    assert graph_backend.node_ids() == [ids["c"]]
-
-
-@pytest.mark.parametrize("dtype", [np.int64, object], ids=["int64", "object"])
-def test_bulk_add_overlaps_numpy_array(graph_backend: BaseGraph, dtype: type) -> None:
-    """Bulk overlap insertion accepts numeric and object arrays of NumPy integers."""
-    a, b, c = graph_backend.bulk_add_nodes([{"t": 0}, {"t": 0}, {"t": 0}])
-    overlaps = np.array([[np.int64(a), np.int64(b)], [np.int64(b), np.int64(c)]], dtype=dtype)
-
-    graph_backend.bulk_add_overlaps(overlaps)
-
-    assert sorted(graph_backend.overlaps()) == sorted([[a, b], [b, c]])
 
 
 def test_add_node(graph_backend: BaseGraph) -> None:

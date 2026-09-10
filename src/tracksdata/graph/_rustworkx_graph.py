@@ -23,7 +23,7 @@ from tracksdata.utils._cache import cache_method
 from tracksdata.utils._dataframe import unpack_array_attrs
 from tracksdata.utils._dtypes import AttrSchema, process_attr_key_args
 from tracksdata.utils._logging import LOG
-from tracksdata.utils._numpy_native import is_int_like
+from tracksdata.utils._numpy_native import is_int_like, to_native, to_native_list
 from tracksdata.utils._signal import (
     emit_node_added_events,
     emit_node_removed_events,
@@ -181,8 +181,8 @@ class RXFilter(BaseFilter):
         self._graph = graph
         self._attr_comps = attr_comps
 
-        if node_ids is not None and hasattr(node_ids, "tolist"):
-            node_ids = node_ids.tolist()
+        if node_ids is not None:
+            node_ids = to_native_list(node_ids)
 
         self._node_ids = node_ids
         self._include_targets = include_targets
@@ -696,10 +696,7 @@ class RustWorkXGraph(BaseGraph):
         ValueError
             If any node_id does not exist in the graph.
         """
-        if hasattr(node_ids, "tolist"):
-            node_ids = node_ids.tolist()
-        else:
-            node_ids = list(node_ids)
+        node_ids = to_native_list(node_ids)
         if len(node_ids) == 0:
             return
 
@@ -755,10 +752,7 @@ class RustWorkXGraph(BaseGraph):
         ValueError
             If any edge_id does not exist in the graph.
         """
-        if hasattr(edge_ids, "tolist"):
-            edge_ids = edge_ids.tolist()
-        else:
-            edge_ids = list(edge_ids)
+        edge_ids = to_native_list(edge_ids)
         if len(edge_ids) == 0:
             return
         self._bulk_remove_edges_local(edge_ids)
@@ -847,7 +841,7 @@ class RustWorkXGraph(BaseGraph):
         if node_ids is None:
             node_ids = list(rx_graph.node_indices())
         elif is_int_like(node_ids):
-            node_ids = [node_ids]
+            node_ids = [to_native(node_ids)]
             single_node = True
 
         if not return_attrs and attr_keys is not None:
@@ -1523,7 +1517,7 @@ class RustWorkXGraph(BaseGraph):
             node_ids = self.node_ids()
         rx_graph = self.rx_graph
         if is_int_like(node_ids):
-            return rx_graph.in_degree(node_ids)
+            return rx_graph.in_degree(to_native(node_ids))
         return [rx_graph.in_degree(node_id) for node_id in node_ids]
 
     def out_degree(self, node_ids: list[int] | int | None = None) -> list[int] | int:
@@ -1534,7 +1528,7 @@ class RustWorkXGraph(BaseGraph):
             node_ids = self.node_ids()
         rx_graph = self.rx_graph
         if is_int_like(node_ids):
-            return rx_graph.out_degree(node_ids)
+            return rx_graph.out_degree(to_native(node_ids))
         return [rx_graph.out_degree(node_id) for node_id in node_ids]
 
     def dividing_nodes(self) -> list[int]:
@@ -2093,10 +2087,7 @@ class IndexedRXGraph(MappedGraphMixin, RustWorkXGraph):
         ValueError
             If any node_id does not exist in the graph.
         """
-        if hasattr(node_ids, "tolist"):
-            node_ids = node_ids.tolist()
-        else:
-            node_ids = list(node_ids)
+        node_ids = to_native_list(node_ids)
         if len(node_ids) == 0:
             return
 

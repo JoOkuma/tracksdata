@@ -75,8 +75,7 @@ def _data_numpy_to_native(data: dict[str, Any]) -> None:
         The data to convert. Modified in place.
     """
     for k, v in data.items():
-        if isinstance(v, np.generic):
-            data[k] = v.item()
+        data[k] = to_native(v)
 
 
 def _normalize_updated_value(value: Any, schema: AttrSchema | None) -> Any:
@@ -1271,10 +1270,10 @@ class SQLGraph(BaseGraph):
         [add_overlap][tracksdata.graph.SQLGraph.add_overlap]:
             Add a single overlap to the graph.
         """
-        if hasattr(overlaps, "tolist"):
-            overlaps = overlaps.tolist()
-
-        overlaps = [{"source_id": int(source_id), "target_id": int(target_id)} for source_id, target_id in overlaps]
+        # `overlaps` is a nested sequence, so each id is converted individually
+        overlaps = [
+            {"source_id": to_native(source_id), "target_id": to_native(target_id)} for source_id, target_id in overlaps
+        ]
         self._chunked_sa_write(Session.bulk_insert_mappings, overlaps, self.Overlap)
 
     def overlaps(

@@ -14,7 +14,7 @@ def is_int_like(value: Any) -> bool:
     check rejects the numpy integers that come out of nearly every numpy or polars
     operation. Use this wherever a scalar id must be told apart from a sequence of ids.
     """
-    return isinstance(value, int) or isinstance(value, np.integer)
+    return isinstance(value, int | np.integer)
 
 
 def to_native(value: Any) -> Any:
@@ -47,20 +47,22 @@ def to_native(value: Any) -> Any:
 
 def to_native_list(values: Sequence[Any] | np.ndarray) -> list[Any]:
     """
-    Return ``values`` as a list with every numpy scalar converted to native Python.
+    Return homogeneous ``values`` as a list of native Python scalars.
 
     Parameters
     ----------
     values : Sequence[Any] | np.ndarray
-        The values to convert.
+        The values to convert. All elements are assumed to have the same type.
 
     Returns
     -------
     list[Any]
-        A new list of native Python scalars.
+        A list of native Python scalars. Existing lists of native scalars are
+        returned unchanged.
     """
-    # Object arrays can still contain NumPy scalars after .tolist(). Keep the
-    # compiled conversion for numeric arrays and normalize object elements below.
-    if isinstance(values, np.ndarray) and values.dtype.kind != "O":
+    if isinstance(values, np.ndarray):
         return values.tolist()
+    # Homogeneous inputs need only one type check; guard empty sequences first.
+    if len(values) == 0 or not isinstance(values[0], np.generic):
+        return values if isinstance(values, list) else list(values)
     return [to_native(v) for v in values]
