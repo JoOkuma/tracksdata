@@ -198,7 +198,7 @@ class _SQLIDSet:
         *,
         occurrences: int = 1,
     ) -> None:
-        self._ids: list[int] = to_native_list(ids)
+        self._ids: Sequence[int] = to_native_list(ids)
         # Hold the engine, not the graph, so this set does not participate in
         # the graph -> SQLFilter -> _SQLIDSet -> graph reference cycle.
         # Otherwise the scratch table would only be dropped after Python's
@@ -1278,7 +1278,7 @@ class SQLGraph(BaseGraph):
 
     def overlaps(
         self,
-        node_ids: list[int] | None = None,
+        node_ids: Sequence[int] | None = None,
     ) -> list[list[int, 2]]:
         """
         Get the overlaps between the nodes in `node_ids`.
@@ -1323,7 +1323,7 @@ class SQLGraph(BaseGraph):
         self,
         node_key: str,
         neighbor_key: str,
-        node_ids: list[int] | int | None,
+        node_ids: Sequence[int] | int | None,
         attr_keys: Sequence[str] | str | None = None,
         *,
         return_attrs: bool = False,
@@ -1340,7 +1340,7 @@ class SQLGraph(BaseGraph):
             The edge attribute key for the query node (e.g., "source_id").
         neighbor_key : str
             The edge attribute key for the neighbor node (e.g., "target_id").
-        node_ids : list[int] | int | None
+        node_ids : Sequence[int] | int | None
             The IDs of the nodes to get neighbors for.
             If None, all nodes are used.
         attr_keys : Sequence[str] | str | None, optional
@@ -1359,7 +1359,7 @@ class SQLGraph(BaseGraph):
             neighbor ID list.
         """
         single_node = False
-        filter_node_ids: list[int] | None
+        filter_node_ids: Sequence[int] | None
         if is_int_like(node_ids):
             node_ids = [to_native(node_ids)]
             filter_node_ids = node_ids
@@ -2136,8 +2136,8 @@ class SQLGraph(BaseGraph):
     def _chunked_sa_read(
         self,
         session: Session,
-        query_filter_op: Callable[[T], Query],
-        data: list[T],
+        query_filter_op: Callable[[Sequence[T]], Query],
+        data: Sequence[T],
         table_class: type[DeclarativeBase],
     ) -> pl.DataFrame:
         """
@@ -2147,10 +2147,10 @@ class SQLGraph(BaseGraph):
         ----------
         session : Session
             The SQLAlchemy session.
-        query_filter_op : Callable[[T], Query]
+        query_filter_op : Callable[[Sequence[T]], Query]
             The function to apply a query filter to the data. It must return a SQLAlchemy Query object.
-        data : list[T]
-            List of data to passed into the query_filter_op function.
+        data : Sequence[T]
+            Data to pass into the query_filter_op function in chunks.
         table_class : type[DeclarativeBase]
             The SQLAlchemy table class.
 
@@ -2315,7 +2315,7 @@ class SQLGraph(BaseGraph):
 
     def _get_degree(
         self,
-        node_ids: list[int] | int | None,
+        node_ids: Sequence[int] | int | None,
         node_key: str,
     ) -> list[int] | int:
         edge_key_col = getattr(self.Edge, node_key)

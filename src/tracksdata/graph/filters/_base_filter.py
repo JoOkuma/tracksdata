@@ -1,4 +1,5 @@
 import abc
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -33,7 +34,7 @@ class BaseFilter(abc.ABC):
         """
 
     @abc.abstractmethod
-    def node_ids(self) -> list[int]:
+    def node_ids(self) -> Sequence[int]:
         """
         Get the ids of the nodes resulting from the filter.
         """

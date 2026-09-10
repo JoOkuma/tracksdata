@@ -45,9 +45,9 @@ def to_native(value: Any) -> Any:
     return value
 
 
-def to_native_list(values: Sequence[Any] | np.ndarray) -> list[Any]:
+def to_native_list(values: Sequence[Any] | np.ndarray) -> Sequence[Any]:
     """
-    Return homogeneous ``values`` as a list of native Python scalars.
+    Return homogeneous ``values`` as a sequence of native Python scalars.
 
     Parameters
     ----------
@@ -56,13 +56,13 @@ def to_native_list(values: Sequence[Any] | np.ndarray) -> list[Any]:
 
     Returns
     -------
-    list[Any]
-        A list of native Python scalars. Existing lists of native scalars are
-        returned unchanged.
+    Sequence[Any]
+        Native scalar sequences are returned unchanged. NumPy arrays and
+        sequences of NumPy scalars are converted to lists.
     """
     if isinstance(values, np.ndarray):
         return values.tolist()
     # Homogeneous inputs need only one type check; guard empty sequences first.
     if len(values) == 0 or not isinstance(values[0], np.generic):
-        return values if isinstance(values, list) else list(values)
+        return values
     return [to_native(v) for v in values]

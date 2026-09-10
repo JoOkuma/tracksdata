@@ -193,7 +193,7 @@ class RXFilter(BaseFilter):
         graph._validate_attr_keys(attr_comps_to_strs(self._edge_attr_comps), "edge")
 
     @cache_method
-    def _current_node_ids(self) -> list[int]:
+    def _current_node_ids(self) -> Sequence[int]:
         """
         Get the node IDs without considering their `source` or `target` neighbors.
         """
@@ -209,7 +209,7 @@ class RXFilter(BaseFilter):
         return node_ids
 
     @cache_method
-    def node_ids(self) -> list[int]:
+    def node_ids(self) -> Sequence[int]:
         # if there are no edge filters nor include flags, we can return the current node ids
         if not self._edge_attr_comps and (not self._include_targets and not self._include_sources):
             return self._current_node_ids()
@@ -591,7 +591,7 @@ class RustWorkXGraph(BaseGraph):
 
     def _bulk_remove_nodes_local(
         self,
-        node_ids: list[int],
+        node_ids: Sequence[int],
         *,
         capture_attrs: bool = False,
     ) -> dict[int, dict[str, Any]]:
@@ -643,7 +643,7 @@ class RustWorkXGraph(BaseGraph):
             edge_ids.append(self._add_edge_local(src, tgt, edge))
         return edge_ids
 
-    def _bulk_remove_edges_local(self, edge_ids: list[int]) -> None:
+    def _bulk_remove_edges_local(self, edge_ids: Sequence[int]) -> None:
         """Atomic-validate then drop edges by id via rx_graph.remove_edges_from."""
         edge_map = self.rx_graph.edge_index_map()
         missing = [eid for eid in edge_ids if eid not in edge_map]
