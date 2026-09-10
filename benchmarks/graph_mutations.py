@@ -69,6 +69,8 @@ class GraphMutationsBenchmark:
         self.graph = _build_graph(backend_name, n_nodes)
         self.view = self.graph.filter().subgraph()
         all_ids = self.graph.node_ids()
+        self.filter_targets = all_ids
+        self.overlap_pairs = np.asarray(list(pairwise(all_ids)), dtype=np.int64)
         self.removal_targets = all_ids[:N_OPS]
         self.update_targets = all_ids[: N_OPS * 4]
 
@@ -107,6 +109,12 @@ class GraphMutationsBenchmark:
 
     def time_filter_node_ids(self, backend_name: str, n_nodes: int) -> None:
         self.graph.filter(NodeAttr(DEFAULT_ATTR_KEYS.T) >= 1).node_ids()
+
+    def time_filter_explicit_node_ids(self, backend_name: str, n_nodes: int) -> None:
+        self.graph.filter(node_ids=self.filter_targets).node_ids()
+
+    def time_bulk_add_overlaps_numpy(self, backend_name: str, n_nodes: int) -> None:
+        self.graph.bulk_add_overlaps(self.overlap_pairs)
 
 
 def _build_bbox_graph(backend_name: str, n_nodes: int) -> td.graph.BaseGraph:
