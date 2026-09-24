@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import io
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -202,6 +205,37 @@ class AttrSchema:
         """
         return AttrSchema(key=self.key, dtype=self.dtype, default_value=self.default_value)
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AttrSchema):
+            return NotImplemented
+        return (
+            self.key == other.key
+            and self.dtype == other.dtype
+            and _values_equal(self.default_value, other.default_value)
+        )
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
+        return bool(np.array_equal(left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(_values_equal(left[k], right[k]) for k in left)
+    if isinstance(left, list | tuple) and isinstance(right, list | tuple):
+        if len(left) != len(right):
+            return False
+        return all(_values_equal(lv, rv) for lv, rv in zip(left, right, strict=True))
+
+    try:
+        value = left == right
+    except Exception:
+        return False
+
+    if isinstance(value, np.ndarray):
+        return bool(np.all(value))
+    return bool(value)
+
 
 def process_attr_key_args(
     key_or_schema: str | AttrSchema,
@@ -362,6 +396,107 @@ _POLARS_TO_SQLALCHEMY_TYPE_MAP = {
 }
 
 
+STRUCT_FIELD_SEP = "__"
+
+
+def flatten_struct_dtype(
+    key: str,
+    dtype: pl.Struct,
+    sep: str = STRUCT_FIELD_SEP,
+) -> list[tuple[str, pl.DataType]]:
+    """Recursively return ``(flat_column_name, leaf_dtype)`` for all leaves of a struct.
+
+    Parameters
+    ----------
+    key : str
+        The root column name (or already-accumulated flat prefix for nested calls).
+    dtype : pl.Struct
+        The struct dtype to flatten.
+    sep : str
+        Separator between path components.  Defaults to ``STRUCT_FIELD_SEP``.
+
+    Examples
+    --------
+    >>> flatten_struct_dtype("m", pl.Struct({"score": pl.Int64, "label": pl.String}))
+    [("m__score", Int64), ("m__label", String)]
+    """
+    results: list[tuple[str, pl.DataType]] = []
+    for field_name, field_dtype in dtype.to_schema().items():
+        flat_key = f"{key}{sep}{field_name}"
+        if isinstance(field_dtype, pl.Struct):
+            results.extend(flatten_struct_dtype(flat_key, field_dtype, sep))
+        else:
+            results.append((flat_key, field_dtype))
+    return results
+
+
+def _iter_struct_value_leaves(
+    value: dict | None,
+    dtype: pl.Struct,
+    path: tuple[str, ...] = (),
+) -> Iterator[tuple[tuple[str, ...], Any]]:
+    """Yield schema paths and values for every leaf in a logical struct."""
+    value = value or {}
+    for field_name, field_dtype in dtype.to_schema().items():
+        field_path = (*path, field_name)
+        field_value = value.get(field_name)
+        if isinstance(field_dtype, pl.Struct):
+            yield from _iter_struct_value_leaves(field_value, field_dtype, field_path)
+        else:
+            yield field_path, field_value
+
+
+def flatten_struct_value(
+    key: str,
+    value: dict | None,
+    dtype: pl.Struct,
+    sep: str = STRUCT_FIELD_SEP,
+) -> dict[str, Any]:
+    """Flatten a struct dict value into ``{flat_col: scalar}`` pairs.
+
+    Parameters
+    ----------
+    key : str
+        The root column name.
+    value : dict
+        The struct value to flatten (may be ``None`` or empty).
+    dtype : pl.Struct
+        The struct dtype describing the expected fields.
+    sep : str
+        Separator.  Defaults to ``STRUCT_FIELD_SEP``.
+    """
+    return {sep.join((key, *path)): field_value for path, field_value in _iter_struct_value_leaves(value, dtype)}
+
+
+def normalize_struct_value(value: dict | None, dtype: pl.Struct) -> dict[str, Any]:
+    """Return a complete logical struct with native Python scalar leaves.
+
+    Like :func:`flatten_struct_value`, this follows the dtype rather than only
+    the keys present in ``value``. Missing fields therefore become ``None``,
+    matching the physical value written to SQL, while the nested logical shape
+    needed by graph attributes and signal payloads is retained.
+
+    Parameters
+    ----------
+    value : dict | None
+        Logical struct value to normalize.
+    dtype : pl.Struct
+        Struct dtype describing its fields.
+
+    Returns
+    -------
+    dict[str, Any]
+        Complete nested struct containing no NumPy scalar leaves.
+    """
+    result: dict[str, Any] = {}
+    for path, field_value in _iter_struct_value_leaves(value, dtype):
+        current = result
+        for field_name in path[:-1]:
+            current = current.setdefault(field_name, {})
+        current[path[-1]] = field_value.item() if isinstance(field_value, np.generic) else field_value
+    return result
+
+
 def polars_dtype_to_sqlalchemy_type(dtype: pl.DataType) -> TypeEngine:
     """
     Convert a polars dtype to SQLAlchemy type.
@@ -443,6 +578,99 @@ def sqlalchemy_type_to_polars_dtype(sa_type: TypeEngine) -> pl.DataType:
 
     # Fallback to Object for unknown types
     return pl.Object
+
+
+def _normalize_default_for_dtype(default_value: Any, dtype: pl.DataType) -> Any:
+    if isinstance(dtype, pl.Array | pl.List) and isinstance(default_value, np.ndarray):
+        return default_value.tolist()
+    return default_value
+
+
+def _normalize_deserialized_default(default_value: Any, dtype: pl.DataType) -> Any:
+    if isinstance(dtype, pl.Array):
+        if isinstance(default_value, pl.Series):
+            default_value = default_value.to_list()
+        numpy_dtype = polars_dtype_to_numpy_dtype(dtype.inner, allow_sequence=True)
+        return np.asarray(default_value, dtype=numpy_dtype).reshape(dtype.shape)
+
+    if isinstance(dtype, pl.List):
+        if isinstance(default_value, pl.Series):
+            return default_value.to_list()
+        if isinstance(default_value, np.ndarray):
+            return default_value.tolist()
+
+    return default_value
+
+
+_ATTR_SCHEMA_VALUE_COL = "__attr_schema_value__"
+_ATTR_SCHEMA_FALLBACK_COL = "__attr_schema_fallback__"
+
+
+def serialize_attr_schema(schema: AttrSchema) -> str:
+    """
+    Serialize an AttrSchema into a base64-encoded Arrow IPC payload.
+
+    The primary format stores schema.default_value in the first row of a
+    single dummy column whose dtype is schema.dtype. This keeps dtype and
+    default value in one Arrow IPC payload.
+    """
+    normalized_default = _normalize_default_for_dtype(schema.default_value, schema.dtype)
+    df = pl.DataFrame(
+        {
+            _ATTR_SCHEMA_VALUE_COL: pl.Series(
+                _ATTR_SCHEMA_VALUE_COL,
+                values=[normalized_default],
+                dtype=schema.dtype,
+            ),
+        }
+    )
+
+    buffer = io.BytesIO()
+    try:
+        df.write_ipc(buffer)
+    except Exception:
+        # Some dtypes (e.g. pl.Object) cannot roundtrip through Arrow IPC schema.
+        # Store pickled (dtype, default) in the first row of a binary dummy column.
+        fallback_payload = dumps((schema.dtype, schema.default_value))
+        fallback_df = pl.DataFrame(
+            {
+                _ATTR_SCHEMA_FALLBACK_COL: pl.Series(
+                    _ATTR_SCHEMA_FALLBACK_COL,
+                    values=[fallback_payload],
+                    dtype=pl.Binary,
+                ),
+            }
+        )
+        buffer = io.BytesIO()
+        fallback_df.write_ipc(buffer)
+
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def deserialize_attr_schema(encoded_schema: str, *, key: str) -> AttrSchema:
+    """
+    Deserialize an AttrSchema previously encoded by `serialize_attr_schema`.
+    """
+    data = base64.b64decode(encoded_schema)
+    buffer = io.BytesIO(data)
+    restored_df = pl.read_ipc(buffer)
+
+    if _ATTR_SCHEMA_VALUE_COL in restored_df.columns:
+        dtype = restored_df.schema[_ATTR_SCHEMA_VALUE_COL]
+        default_value = restored_df[_ATTR_SCHEMA_VALUE_COL][0]
+    elif _ATTR_SCHEMA_FALLBACK_COL in restored_df.columns:
+        fallback_payload = restored_df[_ATTR_SCHEMA_FALLBACK_COL][0]
+        if fallback_payload is None:
+            raise ValueError("Fallback schema payload is missing.")
+        dtype, default_value = loads(fallback_payload)
+    else:
+        raise ValueError("Unrecognized attr schema payload format.")
+
+    if not pl.datatypes.is_polars_dtype(dtype):
+        raise TypeError(f"Decoded value is not a polars dtype: {type(dtype)}")
+
+    default_value = _normalize_deserialized_default(default_value, dtype)
+    return AttrSchema(key=key, dtype=dtype, default_value=default_value)
 
 
 def validate_default_value_dtype_compatibility(default_value: Any, dtype: pl.DataType) -> None:

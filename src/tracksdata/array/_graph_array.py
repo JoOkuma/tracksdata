@@ -1,12 +1,12 @@
 from collections.abc import Sequence
 from copy import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from tracksdata.array._base_array import ArrayIndex, BaseReadOnlyArray
 from tracksdata.array._nd_chunk_cache import NDChunkCache
-from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.constants import DEFAULT_ATTR_KEYS, DEFAULT_METADATA_KEYS
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.options import get_options
 from tracksdata.utils._dtypes import polars_dtype_to_numpy_dtype
@@ -23,7 +23,7 @@ def _validate_shape(
     """Helper function to validate the shape argument."""
     if shape is None:
         try:
-            shape = graph.metadata()["shape"]
+            shape = graph.metadata[DEFAULT_METADATA_KEYS.SHAPE]
         except KeyError as e:
             raise KeyError(
                 f"`shape` is required to `{func_name}`. "
@@ -200,6 +200,9 @@ class GraphArrayView(BaseReadOnlyArray):
             frame_attr_key=DEFAULT_ATTR_KEYS.T,
             bbox_attr_key=DEFAULT_ATTR_KEYS.BBOX,
         )
+        self.graph.node_added.connect(self._on_node_added)
+        self.graph.node_removed.connect(self._on_node_removed)
+        self.graph.node_updated.connect(self._on_node_updated)
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -351,3 +354,139 @@ class GraphArrayView(BaseReadOnlyArray):
         for mask, value in zip(df[DEFAULT_ATTR_KEYS.MASK], df[self._attr_key], strict=True):
             mask: Mask
             mask.paint_buffer(buffer, value, offset=self._offset)
+
+    def _offset_as_array(self, ndim: int) -> np.ndarray:
+        """Normalize `offset` to a vector for each spatial axis."""
+        if np.isscalar(self._offset):
+            return np.full(ndim, int(self._offset), dtype=np.int64)
+
+        offset = np.asarray(self._offset, dtype=np.int64).reshape(-1)
+        if len(offset) != ndim:
+            raise ValueError(f"`offset` must have length {ndim}, got {len(offset)}")
+        return offset
+
+    def _bbox_to_slices(self, bbox: Any) -> tuple[slice, ...] | None:
+        """
+        Convert a bbox to clipped spatial slices in array coordinates.
+
+        Returns `None` when the bbox does not overlap the current array volume.
+        """
+        bbox = np.asarray(bbox, dtype=np.int64).reshape(-1)
+        ndim = len(self.original_shape) - 1
+        if len(bbox) != 2 * ndim:
+            raise ValueError(f"`bbox` must have length {2 * ndim}, got {len(bbox)}")
+
+        offset = self._offset_as_array(ndim)
+        start = bbox[:ndim] + offset
+        stop = bbox[ndim:] + offset
+
+        shape = np.asarray(self.original_shape[1:], dtype=np.int64)
+        start = np.clip(start, 0, shape)
+        stop = np.clip(stop, 0, shape)
+
+        if np.any(stop <= start):
+            return None
+
+        return tuple(slice(int(s), int(e)) for s, e in zip(start, stop, strict=True))
+
+    def _invalidate_bbox(self, time_values: Sequence[Any], bboxes: Sequence[np.ndarray | None]) -> None:
+        """
+        Invalidate the cache regions covered by the given times and bboxes.
+
+        ``time_values`` and ``bboxes`` are parallel sequences; each ``(time, bbox)``
+        pair is clipped to the array volume and the matching cache region is dropped.
+        A bbox that lies outside the array volume invalidates nothing.
+
+        A ``GraphArrayView`` requires every node to carry a ``bbox`` attribute, so a
+        ``None`` bbox is a programming error and raises ``ValueError``.
+        """
+        if hasattr(time_values, "to_list"):
+            time_values = time_values.to_list()
+
+        for time_value, bbox in zip(time_values, bboxes, strict=True):
+            try:
+                time = int(time_value)
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Time attribute value must be a scalar integer, got {time_value!r} of type {type(time_value)}"
+                ) from e
+            if not (0 <= time < self.original_shape[0]):
+                continue
+
+            if bbox is None:
+                raise ValueError(
+                    f"Node at time {time} is missing a '{DEFAULT_ATTR_KEYS.BBOX}' attribute. "
+                    "A GraphArrayView requires every node to have a bbox."
+                )
+
+            slices = self._bbox_to_slices(bbox)
+            if slices is not None:
+                self._cache.invalidate(time=time, volume_slicing=slices)
+
+    def _on_node_added(
+        self,
+        node_ids: list[int],
+        new_attrs: list[dict],
+    ) -> None:
+        del node_ids
+        self._invalidate_bbox(
+            [attrs[DEFAULT_ATTR_KEYS.T] for attrs in new_attrs],
+            [attrs.get(DEFAULT_ATTR_KEYS.BBOX) for attrs in new_attrs],
+        )
+
+    def _on_node_removed(self, node_ids: list[int], old_attrs: list[dict]) -> None:
+        del node_ids
+        self._invalidate_bbox(
+            [attrs[DEFAULT_ATTR_KEYS.T] for attrs in old_attrs],
+            [attrs.get(DEFAULT_ATTR_KEYS.BBOX) for attrs in old_attrs],
+        )
+
+    def _on_node_updated(
+        self,
+        node_ids: list[int],
+        old_attrs: list[dict],
+        new_attrs: list[dict],
+        changed_keys: set[str] | None = None,
+    ) -> None:
+        del node_ids
+        # The rendered output depends only on position (t/bbox), the mask, and the
+        # displayed attribute. If none changed, there is nothing to invalidate.
+        if changed_keys is not None and changed_keys.isdisjoint(
+            {DEFAULT_ATTR_KEYS.T, DEFAULT_ATTR_KEYS.BBOX, DEFAULT_ATTR_KEYS.MASK, self._attr_key}
+        ):
+            return
+        time_values: list[Any] = []
+        bboxes: list[Any] = []
+        for old_attr, new_attr in zip(old_attrs, new_attrs, strict=True):
+            old_t = old_attr[DEFAULT_ATTR_KEYS.T]
+            new_t = new_attr[DEFAULT_ATTR_KEYS.T]
+            old_bbox = old_attr.get(DEFAULT_ATTR_KEYS.BBOX)
+            new_bbox = new_attr.get(DEFAULT_ATTR_KEYS.BBOX)
+
+            moved = old_t != new_t or not np.array_equal(old_bbox, new_bbox)
+
+            if moved:
+                # Node relocated: clear the stale region and paint the new one.
+                time_values.extend((old_t, new_t))
+                bboxes.extend((old_bbox, new_bbox))
+            elif old_attr.get(self._attr_key) != new_attr.get(self._attr_key) or self._mask_changed(old_attr, new_attr):
+                time_values.append(new_t)
+                bboxes.append(new_bbox)
+
+        self._invalidate_bbox(time_values, bboxes)
+
+    @staticmethod
+    def _mask_changed(old_attr: dict, new_attr: dict) -> bool:
+        """
+        Whether the painted output changed while the bbox stayed in place.
+
+        The rendered region depends on the displayed attribute value and the mask
+        pixels, so a mask swap with an unchanged bbox still requires invalidation.
+        """
+        old_mask = old_attr.get(DEFAULT_ATTR_KEYS.MASK)
+        new_mask = new_attr.get(DEFAULT_ATTR_KEYS.MASK)
+        if old_mask is None and new_mask is None:
+            return False
+        elif old_mask is None or new_mask is None:
+            return True
+        return old_mask != new_mask

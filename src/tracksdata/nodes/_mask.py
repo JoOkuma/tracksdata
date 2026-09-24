@@ -67,13 +67,18 @@ class Mask:
     def __getstate__(self) -> dict:
         data_dict = self.__dict__.copy()
         prev_nthreads = blosc2.set_nthreads(1)
-        data_dict["_mask"] = blosc2.pack_array2(self._mask)
+        # Bypass blosc2 printing overhead by directly creating a schunk and converting it to cframe,
+        # instead of using blosc2.pack_tensor
+        schunk = blosc2.SChunk(data=self._mask)
+        dtype = self._mask.dtype.descr if self._mask.dtype.kind == "V" else self._mask.dtype.str
+        schunk.vlmeta["__pack_tensor__"] = ("numpy", self._mask.shape, dtype)
+        data_dict["_mask"] = schunk.to_cframe()
         blosc2.set_nthreads(prev_nthreads)
         return data_dict
 
     def __setstate__(self, state: dict) -> None:
         prev_nthreads = blosc2.set_nthreads(1)
-        state["_mask"] = blosc2.unpack_array2(state["_mask"])
+        state["_mask"] = blosc2.unpack_tensor(state["_mask"])
         blosc2.set_nthreads(prev_nthreads)
         self.__dict__.update(state)
 
@@ -177,14 +182,34 @@ class Mask:
         offset : NDArray[np.integer] | int, optional
             The offset to add to the indices, should be used with bounding box information.
         """
-        if isinstance(offset, int):
-            offset = np.full(self._mask.ndim, offset)
+        ndim = self._mask.ndim
+        bbox = self._bbox
+        shape = buffer.shape
 
-        window = tuple(
-            slice(i + o, j + o)
-            for i, j, o in zip(self._bbox[: self._mask.ndim], self._bbox[self._mask.ndim :], offset, strict=True)
+        if isinstance(offset, int):
+            starts = [int(bbox[i]) + offset for i in range(ndim)]
+            stops = [int(bbox[i + ndim]) + offset for i in range(ndim)]
+        else:
+            starts = [int(bbox[i]) + int(offset[i]) for i in range(ndim)]
+            stops = [int(bbox[i + ndim]) + int(offset[i]) for i in range(ndim)]
+
+        # fast path: bbox fully inside buffer — no numpy allocations
+        if all(starts[i] >= 0 and stops[i] <= shape[i] for i in range(ndim)):
+            buffer[tuple(slice(starts[i], stops[i]) for i in range(ndim))][self._mask] = value
+            return
+
+        # if bboxes falls outside buffer, clip to buffer bounds
+        clipped_start = [max(0, starts[i]) for i in range(ndim)]
+        clipped_stop = [min(shape[i], stops[i]) for i in range(ndim)]
+
+        if any(clipped_stop[i] <= clipped_start[i] for i in range(ndim)):
+            return
+
+        mask_slicing = tuple(
+            slice(clipped_start[i] - starts[i], self._mask.shape[i] - (stops[i] - clipped_stop[i])) for i in range(ndim)
         )
-        buffer[window][self._mask] = value
+        window = tuple(slice(clipped_start[i], clipped_stop[i]) for i in range(ndim))
+        buffer[window][self._mask[mask_slicing]] = value
 
     def iou(self, other: "Mask") -> float:
         """
@@ -262,47 +287,91 @@ class Mask:
 
         return Mask(union_mask, np.concatenate([union_start, union_end]))
 
-    def __isub__(self, other: "Mask") -> "Mask":
+    def _overlap_slicing(
+        self,
+        other: "Mask",
+    ) -> tuple[tuple[slice, ...], tuple[slice, ...]] | None:
         """
-        Compute the difference between two masks considering their bounding boxes location.
+        Compute the slicing that aligns both masks over their overlapping region.
 
         Parameters
         ----------
         other : Mask
-            The other mask to compute the difference with.
+            The mask to align with.
+
+        Returns
+        -------
+        tuple[tuple[slice, ...], tuple[slice, ...]] | None
+            The slicing into ``self.mask`` and ``other.mask`` selecting the same
+            absolute coordinates, or None if the bounding boxes do not overlap.
         """
-        if self.intersection(other) == 0:
-            return self
+        ndim = self._mask.ndim
+        if ndim != other._mask.ndim:
+            raise ValueError(
+                f"Cannot compare masks of different dimensions: {ndim} and {other._mask.ndim}.",
+            )
 
-        other_slicing = []
-        self_slicing = []
-        for i in range(self._mask.ndim):
-            diff = self._bbox[i] - other._bbox[i]
-            if diff > 0:
-                self_s = None
-                other_s = diff
-            else:
-                self_s = -diff
-                other_s = None
+        start = np.maximum(self._bbox[:ndim], other._bbox[:ndim])
+        end = np.minimum(self._bbox[ndim:], other._bbox[ndim:])
 
-            diff = self._bbox[i + self._mask.ndim] - other._bbox[i + other._mask.ndim]
-            if diff > 0:
-                self_e = -diff
-                other_e = None
-            elif diff < 0:
-                self_e = None
-                other_e = diff
-            else:
-                self_e = None
-                other_e = None
+        if np.any(end <= start):
+            return None
 
-            self_slicing.append(slice(self_s, self_e))
-            other_slicing.append(slice(other_s, other_e))
+        return (
+            tuple(slice(s, e) for s, e in zip(start - self._bbox[:ndim], end - self._bbox[:ndim], strict=True)),
+            tuple(slice(s, e) for s, e in zip(start - other._bbox[:ndim], end - other._bbox[:ndim], strict=True)),
+        )
 
-        self_slicing = tuple(self_slicing)
-        other_slicing = tuple(other_slicing)
+    def __sub__(self, other: "Mask") -> "Mask":
+        """
+        Compute the difference between two masks considering their bounding boxes location.
 
-        self._mask[self_slicing] &= ~other._mask[other_slicing]
+        Returns a **new** Mask; the original is not modified.
+
+        Parameters
+        ----------
+        other : Mask
+            The mask to subtract.
+
+        Returns
+        -------
+        Mask
+            A new mask with the overlapping pixels of *other* removed.
+        """
+        new_mask = self._mask.copy()
+        slicing = self._overlap_slicing(other)
+
+        if slicing is not None:
+            self_slicing, other_slicing = slicing
+            new_mask[self_slicing] &= ~other._mask[other_slicing]
+
+        return Mask(new_mask, self._bbox.copy())
+
+    def __isub__(self, other: "Mask") -> "Mask":
+        """
+        Remove the overlapping pixels of another mask, in-place.
+
+        Modifies this mask's data rather than returning a new object.
+        Use ``mask = mask - other`` when a copy is required, for example when
+        the mask is stored somewhere that relies on identity or on observing
+        reassignment to detect changes.
+
+        Parameters
+        ----------
+        other : Mask
+            The mask to subtract.
+
+        Returns
+        -------
+        Mask
+            This mask, with the overlapping pixels of *other* removed.
+        """
+        slicing = self._overlap_slicing(other)
+
+        if slicing is not None:
+            self_slicing, other_slicing = slicing
+            self._mask[self_slicing] &= ~other._mask[other_slicing]
+
         return self
 
     def _crop_overhang(self, image_shape: tuple[int, ...]) -> None:

@@ -1,3 +1,5 @@
+import datetime as dt
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +9,7 @@ import polars as pl
 import pytest
 import rustworkx as rx
 import sqlalchemy as sa
+from geff_spec import GeffMetadata
 from zarr.storage import MemoryStore
 
 from tracksdata.attrs import EdgeAttr, NodeAttr
@@ -51,6 +54,122 @@ def test_edge_validation(graph_backend: BaseGraph) -> None:
     """Test edge validation."""
     with pytest.raises((ValueError, KeyError)):
         graph_backend.add_edge(0, 1, {"weight": 0.5})
+
+
+def _one_edge_graph(graph: BaseGraph) -> dict[str, int]:
+    """Declare one node attr and one edge attr, then build a 2-node / 1-edge graph."""
+    graph.add_node_attr_key("area", dtype=pl.Float64, default_value=0.0)
+    graph.add_edge_attr_key("w", dtype=pl.Float64, default_value=0.0)
+    a = graph.add_node({"t": 0, "area": 1.0})
+    b = graph.add_node({"t": 1, "area": 2.0})
+    e = graph.add_edge(a, b, {"w": 1.0})
+    return {"a": a, "b": b, "e": e}
+
+
+# Every public read path that accepts an attribute key. Each must report an unknown key the
+# same way on every backend; before this was centralized they raised three different types
+# (AttributeError from SQLAlchemy's getattr, KeyError from a dict lookup, and polars'
+# ColumnNotFoundError, which is not even a KeyError subclass).
+_MISSING_ATTR_ACCESSORS: dict[str, Callable[[BaseGraph, dict[str, int]], Any]] = {
+    "node_attrs": lambda g, i: g.node_attrs(attr_keys=["nope"]),
+    "edge_attrs": lambda g, i: g.edge_attrs(attr_keys=["nope"]),
+    "nodes[id][key]": lambda g, i: g.nodes[i["a"]]["nope"],
+    "edges[id][key]": lambda g, i: g.edges[i["e"]]["nope"],
+    "filter(NodeAttr)": lambda g, i: g.filter(NodeAttr("nope") == 1).node_ids(),
+    "filter(EdgeAttr)": lambda g, i: g.filter(EdgeAttr("nope") == 1).edge_ids(),
+    "successors": lambda g, i: g.successors(i["a"], attr_keys=["nope"], return_attrs=True),
+    "predecessors": lambda g, i: g.predecessors(i["b"], attr_keys=["nope"], return_attrs=True),
+    "filter().node_attrs": lambda g, i: g.filter(node_ids=[i["a"]]).node_attrs(attr_keys=["nope"]),
+    "filter().edge_attrs": lambda g, i: g.filter(node_ids=[i["a"], i["b"]]).edge_attrs(attr_keys=["nope"]),
+}
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    list(_MISSING_ATTR_ACCESSORS.values()),
+    ids=list(_MISSING_ATTR_ACCESSORS.keys()),
+)
+def test_missing_attr_key_raises_key_error(
+    graph_backend: BaseGraph,
+    accessor: Callable[[BaseGraph, dict[str, int]], Any],
+) -> None:
+    """Reading an undeclared attribute key raises KeyError on every backend."""
+    ids = _one_edge_graph(graph_backend)
+
+    with pytest.raises(KeyError):
+        accessor(graph_backend, ids)
+
+
+def test_missing_attr_key_error_message(graph_backend: BaseGraph) -> None:
+    """The error names the unknown key and lists the valid ones.
+
+    Diagnosability is the point of the guard, not just the exception type.
+    """
+    _one_edge_graph(graph_backend)
+
+    with pytest.raises(KeyError) as exc_info:
+        graph_backend.node_attrs(attr_keys=["nope"])
+
+    message = str(exc_info.value)
+    assert "nope" in message
+    assert "area" in message, f"error should list the available keys, got: {message}"
+
+    with pytest.raises(KeyError) as exc_info:
+        graph_backend.edge_attrs(attr_keys=["nope"])
+
+    message = str(exc_info.value)
+    assert "nope" in message
+    assert "w" in message, f"error should list the available keys, got: {message}"
+
+
+def test_filter_missing_attr_key_raises_eagerly(graph_backend: BaseGraph) -> None:
+    """filter() validates at construction, not at collect time.
+
+    Without this the traceback points at the collect call rather than at the caller's typo.
+    """
+    _one_edge_graph(graph_backend)
+
+    with pytest.raises(KeyError):
+        graph_backend.filter(NodeAttr("nope") == 1)
+
+    with pytest.raises(KeyError):
+        graph_backend.filter(EdgeAttr("nope") == 1)
+
+
+def test_missing_attr_key_among_valid_ones_raises(graph_backend: BaseGraph) -> None:
+    """One bad key in an otherwise valid list still raises."""
+    _one_edge_graph(graph_backend)
+
+    with pytest.raises(KeyError):
+        graph_backend.node_attrs(attr_keys=["area", "nope"])
+
+
+def test_valid_attr_keys_are_not_rejected(graph_backend: BaseGraph) -> None:
+    """The guard must not reject legitimate keys, including the id columns."""
+    ids = _one_edge_graph(graph_backend)
+
+    assert graph_backend.node_attrs(attr_keys=["area"])["area"].to_list() == [1.0, 2.0]
+    assert graph_backend.node_attrs(attr_keys="area")["area"].to_list() == [1.0, 2.0]
+    assert graph_backend.edge_attrs(attr_keys=["w"])["w"].to_list() == [1.0]
+
+    # id columns are not user-declared attributes but are legitimately requestable
+    node_df = graph_backend.node_attrs(attr_keys=[DEFAULT_ATTR_KEYS.NODE_ID, "area"])
+    assert DEFAULT_ATTR_KEYS.NODE_ID in node_df.columns
+
+    edge_df = graph_backend.edge_attrs(
+        attr_keys=[DEFAULT_ATTR_KEYS.EDGE_ID, DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET, "w"]
+    )
+    assert DEFAULT_ATTR_KEYS.EDGE_ID in edge_df.columns
+
+    # attr_keys=None means "everything" and must stay valid
+    assert not graph_backend.node_attrs().is_empty()
+    assert not graph_backend.edge_attrs().is_empty()
+
+    # single-item accessors and filters with valid keys keep working
+    assert graph_backend.nodes[ids["a"]]["area"] == 1.0
+    assert graph_backend.edges[ids["e"]]["w"] == 1.0
+    assert graph_backend.filter(NodeAttr("area") == 1.0).node_ids() == [ids["a"]]
+    assert graph_backend.filter(EdgeAttr("w") == 1.0).edge_ids() == [ids["e"]]
 
 
 def test_add_node(graph_backend: BaseGraph) -> None:
@@ -105,6 +224,124 @@ def test_add_edge(graph_backend: BaseGraph) -> None:
     df = graph_backend.edge_attrs()
     assert df["new_attribute"].to_list() == [0.0, 1.0]
     assert df["weight"].to_list() == [0.5, 0.1]
+
+
+def test_array_attr_read_honors_declared_dtype(graph_backend: BaseGraph) -> None:
+    """An `Array(Float64)` column must not be truncated to integers when read back.
+
+    The declared dtype has to win over any dtype inferred from the leading rows,
+    otherwise a whole-numbered first row silently truncates the fractional ones.
+    """
+    graph_backend.add_node_attr_key("pos", dtype=pl.Array(pl.Float64, 2))
+    graph_backend.add_node_attr_key("values", dtype=pl.List(pl.Float64))
+
+    graph_backend.bulk_add_nodes(
+        [
+            {"t": 0, "pos": [50, 50], "values": [50, 50]},  # whole numbers
+            {"t": 1, "pos": [1.5, 1.5], "values": [1.5, 1.5]},  # fractional
+        ]
+    )
+
+    nodes_df = graph_backend.node_attrs(attr_keys=["t", "pos", "values"]).sort("t")
+    assert nodes_df.schema["pos"] == pl.Array(pl.Float64, 2)
+    assert nodes_df.schema["values"] == pl.List(pl.Float64)
+    assert nodes_df["pos"].to_list() == [[50.0, 50.0], [1.5, 1.5]]
+    assert nodes_df["values"].to_list() == [[50.0, 50.0], [1.5, 1.5]]
+
+
+def test_add_node_and_edge_with_numpy_scalars(graph_backend: BaseGraph) -> None:
+    """Numpy scalars must be stored with the column's declared dtype, not as raw byte buffers.
+
+    Indexing any value out of a numpy array yields a numpy scalar, so this is the
+    norm for importers (geff/CSV/...) feeding values into the graph.
+    """
+    graph_backend.add_node_attr_key("val", dtype=pl.Int64, default_value=-1)
+    graph_backend.add_node_attr_key("pos", dtype=pl.Float64, default_value=0.0)
+    graph_backend.add_node_attr_key("flag", dtype=pl.Boolean, default_value=False)
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Int64, default_value=0)
+
+    node_1 = graph_backend.add_node(
+        {"t": np.int64(0), "val": np.int64(7), "pos": np.float32(1.5), "flag": np.bool_(True)}
+    )
+    node_2, node_3 = graph_backend.bulk_add_nodes(
+        [
+            {"t": np.int32(1), "val": np.int32(8), "pos": np.float64(2.5), "flag": np.bool_(False)},
+            {"t": 2, "val": 9, "pos": 3.5, "flag": True},
+        ]
+    )
+
+    nodes_df = graph_backend.node_attrs(attr_keys=["t", "val", "pos", "flag"]).sort("t")
+    assert nodes_df.schema["val"] == pl.Int64
+    assert nodes_df["t"].to_list() == [0, 1, 2]
+    assert nodes_df["val"].to_list() == [7, 8, 9]
+    assert nodes_df["pos"].to_list() == [1.5, 2.5, 3.5]
+    assert nodes_df["flag"].to_list() == [True, False, True]
+
+    graph_backend.add_edge(np.int64(node_1), np.int64(node_2), {"weight": np.int64(3)})
+    graph_backend.bulk_add_edges(
+        [
+            {
+                DEFAULT_ATTR_KEYS.EDGE_SOURCE: np.int64(node_2),
+                DEFAULT_ATTR_KEYS.EDGE_TARGET: np.int64(node_3),
+                "weight": np.int32(4),
+            }
+        ]
+    )
+
+    edges_df = graph_backend.edge_attrs(
+        attr_keys=[DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET, "weight"]
+    ).sort("weight")
+    assert edges_df["weight"].to_list() == [3, 4]
+    assert edges_df[DEFAULT_ATTR_KEYS.EDGE_SOURCE].to_list() == [node_1, node_2]
+    assert edges_df[DEFAULT_ATTR_KEYS.EDGE_TARGET].to_list() == [node_2, node_3]
+
+    graph_backend.add_overlap(np.int64(node_1), np.int64(node_2))
+    graph_backend.bulk_add_overlaps([[np.int64(node_2), np.int64(node_3)]])
+    assert sorted(graph_backend.overlaps()) == sorted([[node_1, node_2], [node_2, node_3]])
+
+
+def test_sql_node_ids_from_narrow_numpy_time() -> None:
+    """A narrow numpy `t` must not overflow the `t * node_id_time_multiplier` id arithmetic."""
+    graph = SQLGraph(
+        drivername="sqlite",
+        database=":memory:",
+        engine_kwargs={"connect_args": {"check_same_thread": False}},
+    )
+    # np.int32(3) * 1_000_000_000 wraps around to a negative number in int32 arithmetic
+    node_ids = graph.bulk_add_nodes([{"t": np.int32(3)}, {"t": np.int32(3)}])
+
+    assert node_ids == [3 * graph.node_id_time_multiplier, 3 * graph.node_id_time_multiplier + 1]
+    assert all(isinstance(node_id, int) for node_id in node_ids)
+    assert graph.node_ids() == node_ids
+
+
+def test_add_node_with_numpy_scalars_in_struct(graph_backend: BaseGraph) -> None:
+    """Numpy scalars nested inside a struct attribute must also honor the declared dtype."""
+    graph_backend.add_node_attr_key("m", dtype=pl.Struct({"a": pl.Int64, "b": pl.Float64}))
+
+    graph_backend.add_node({"t": 0, "m": {"a": np.int64(3), "b": np.float64(0.25)}})
+    graph_backend.bulk_add_nodes([{"t": 1, "m": {"a": np.int32(4), "b": np.float32(0.5)}}])
+
+    nodes_df = graph_backend.node_attrs(attr_keys=["t", "m"]).sort("t")
+    assert nodes_df["m"].to_list() == [{"a": 3, "b": 0.25}, {"a": 4, "b": 0.5}]
+
+
+def test_update_attrs_with_numpy_scalars(graph_backend: BaseGraph) -> None:
+    """The update path must coerce numpy scalars just like the insert path."""
+    graph_backend.add_node_attr_key("val", dtype=pl.Int64, default_value=-1)
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Int64, default_value=0)
+
+    node_1 = graph_backend.add_node({"t": 0, "val": 0})
+    node_2 = graph_backend.add_node({"t": 1, "val": 0})
+    edge_id = graph_backend.add_edge(node_1, node_2, {"weight": 0})
+
+    graph_backend.update_node_attrs(attrs={"val": np.int64(5)}, node_ids=[node_1])
+    graph_backend.update_node_attrs(attrs={"val": [np.int32(6)]}, node_ids=[node_2])
+    graph_backend.update_edge_attrs(attrs={"weight": np.int64(7)}, edge_ids=[edge_id])
+
+    nodes_df = graph_backend.node_attrs(attr_keys=["t", "val"]).sort("t")
+    assert nodes_df["val"].to_list() == [5, 6]
+    assert graph_backend.edge_attrs(attr_keys=["weight"])["weight"].to_list() == [7]
 
 
 def test_remove_edge_by_id(graph_backend: BaseGraph) -> None:
@@ -222,6 +459,30 @@ def test_filter_nodes_by_membership(graph_backend: BaseGraph) -> None:
 
     np_members = graph_backend.filter(NodeAttr("t").is_in(np.array([1], dtype=np.int64))).node_ids()
     assert set(np_members) == {node_b}
+
+
+def test_filter_nodes_by_struct_field(graph_backend: BaseGraph) -> None:
+    graph_backend.add_node_attr_key("measurements", pl.Struct({"score": pl.Int64, "name": pl.String}))
+
+    node_a = graph_backend.add_node({"t": 0, "measurements": {"score": 1, "name": "A"}})
+    node_b = graph_backend.add_node({"t": 1, "measurements": {"score": 2, "name": "B"}})
+    node_c = graph_backend.add_node({"t": 2, "measurements": {"score": 1, "name": "C"}})
+
+    score_nodes = graph_backend.filter(NodeAttr("measurements").struct.field("score") == 1).node_ids()
+    assert set(score_nodes) == {node_a, node_c}
+
+    name_nodes = graph_backend.filter(NodeAttr("measurements").struct.field("name") == "B").node_ids()
+    assert set(name_nodes) == {node_b}
+
+    measurements = graph_backend.filter(node_ids=[node_a, node_c]).node_attrs(attr_keys=["measurements"])
+    assert measurements.schema["measurements"] == pl.Struct({"score": pl.Int64, "name": pl.String})
+    assert {m["name"] for m in measurements["measurements"].to_list()} == {"A", "C"}
+
+    subgraph = graph_backend.filter(NodeAttr("measurements").struct.field("score") == 1).subgraph(
+        node_attr_keys=["measurements"]
+    )
+    subgraph_measurements = subgraph.node_attrs(attr_keys=["measurements"])
+    assert {m["name"] for m in subgraph_measurements["measurements"].to_list()} == {"A", "C"}
 
 
 def test_time_points(graph_backend: BaseGraph) -> None:
@@ -517,6 +778,54 @@ def test_update_node_attrs(graph_backend: BaseGraph) -> None:
         graph_backend.update_node_attrs(node_ids=[node_1, node_2], attrs={"x": [1.0]})
 
 
+def test_bulk_add_nodes_emits_batched_node_added_callback(graph_backend: BaseGraph) -> None:
+    graph_backend.add_node_attr_key("x", pl.Float64)
+
+    calls: list[tuple[Any, Any]] = []
+    graph_backend.node_added.connect(lambda node_ids, attrs: calls.append((node_ids, attrs)))
+
+    nodes = [{"t": 0, "x": 1.0}, {"t": 1, "x": 2.0}, {"t": 1, "x": 3.0}]
+    node_ids = graph_backend.bulk_add_nodes(nodes)
+
+    assert len(calls) == 1
+    assert calls[0][0] == node_ids
+    assert calls[0][1] == nodes
+
+
+def test_update_node_attrs_emits_batched_node_updated_callback(graph_backend: BaseGraph) -> None:
+    graph_backend.add_node_attr_key("x", pl.Float64)
+
+    node_ids = graph_backend.bulk_add_nodes([{"t": 0, "x": 1.0}, {"t": 1, "x": 2.0}, {"t": 1, "x": 3.0}])
+
+    calls: list[tuple[Any, Any, Any]] = []
+    graph_backend.node_updated.connect(
+        lambda node_ids, old_attrs, new_attrs: calls.append((node_ids, old_attrs, new_attrs))
+    )
+
+    graph_backend.update_node_attrs(node_ids=node_ids, attrs={"x": [10.0, 20.0, 30.0]})
+
+    assert len(calls) == 1
+    assert calls[0][0] == node_ids
+    assert [attrs["x"] for attrs in calls[0][1]] == [1.0, 2.0, 3.0]
+    assert [attrs["x"] for attrs in calls[0][2]] == [10.0, 20.0, 30.0]
+
+
+def test_update_node_attrs_node_updated_carries_changed_keys(graph_backend: BaseGraph) -> None:
+    """node_updated delivers the set of written keys as a 4th arg, so connectors
+    can skip work when none of the keys they track changed."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    graph_backend.add_node_attr_key("score", pl.Float64)
+
+    node_ids = graph_backend.bulk_add_nodes([{"t": 0, "x": 1.0, "score": 0.0}])
+
+    calls: list[set] = []
+    graph_backend.node_updated.connect(lambda node_ids, old_attrs, new_attrs, changed_keys: calls.append(changed_keys))
+
+    graph_backend.update_node_attrs(node_ids=node_ids, attrs={"score": 5.0})
+
+    assert calls == [{"score"}]
+
+
 def test_update_edge_attrs(graph_backend: BaseGraph) -> None:
     """Test updating edge attributes."""
     node1 = graph_backend.add_node({"t": 0})
@@ -532,6 +841,11 @@ def test_update_edge_attrs(graph_backend: BaseGraph) -> None:
     # wrong length
     with pytest.raises(ValueError):
         graph_backend.update_edge_attrs(edge_ids=[edge_id], attrs={"weight": [1.0, 2.0]})
+
+    # the caller's attrs dict must not be mutated (e.g. scalar broadcast to a list)
+    user_attrs = {"weight": 2.0}
+    graph_backend.update_edge_attrs(edge_ids=[edge_id], attrs=user_attrs)
+    assert user_attrs == {"weight": 2.0}
 
 
 def test_num_edges(graph_backend: BaseGraph) -> None:
@@ -650,6 +964,62 @@ def test_edge_attrs_include_targets(graph_backend: BaseGraph) -> None:
 
     msg = f"Single node include_targets=False: Expected {expected_single_exclusive}, got {single_exclusive_edge_ids}"
     assert single_exclusive_edge_ids == expected_single_exclusive, msg
+
+
+def test_edge_attrs_include_sources(graph_backend: BaseGraph) -> None:
+    """Edges must be unique and respect endpoint membership with include_sources."""
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Float64)
+
+    # node0 -> node1 -> node2
+    node0 = graph_backend.add_node({"t": 0})
+    node1 = graph_backend.add_node({"t": 1})
+    node2 = graph_backend.add_node({"t": 2})
+
+    edge0 = graph_backend.add_edge(node0, node1, attrs={"weight": 0.1})
+    edge1 = graph_backend.add_edge(node1, node2, attrs={"weight": 0.2})
+
+    # include_sources=True with both endpoints of edge0 selected:
+    # - edge0: node0 -> node1 ✓ (must appear exactly once)
+    # - edge1: node1 -> node2 ✗ (node2 not selected and include_targets=False)
+    edge_ids = graph_backend.filter(node_ids=[node0, node1], include_sources=True).edge_ids()
+    assert list(edge_ids) == [edge0]
+
+    # include_sources=True selecting only the target of edge0:
+    # - edge0: node0 -> node1 ✓ (in-edge with source outside the selection)
+    edge_ids = graph_backend.filter(node_ids=[node1], include_sources=True).edge_ids()
+    assert list(edge_ids) == [edge0]
+
+    # node attribute filters must constrain edge endpoints the same way
+    assert graph_backend.filter(NodeAttr("t") == 1).edge_ids() == []
+
+    edge_ids = graph_backend.filter(NodeAttr("t") == 1, include_targets=True).edge_ids()
+    assert list(edge_ids) == [edge1]
+
+    edge_ids = graph_backend.filter(NodeAttr("t") == 1, include_sources=True).edge_ids()
+    assert list(edge_ids) == [edge0]
+
+
+def test_filter_node_ids_with_include_flags(graph_backend: BaseGraph) -> None:
+    """Selected nodes must be kept when include flags extend the selection."""
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Float64)
+
+    node0 = graph_backend.add_node({"t": 0})
+    node1 = graph_backend.add_node({"t": 1})
+    isolated = graph_backend.add_node({"t": 0})
+
+    graph_backend.add_edge(node0, node1, attrs={"weight": 0.5})
+
+    # explicitly selected nodes without edges must not be dropped
+    node_ids = graph_backend.filter(node_ids=[node0, isolated], include_targets=True).node_ids()
+    assert sorted(node_ids) == sorted([node0, node1, isolated])
+
+    # node attribute filters behave the same way
+    node_ids = graph_backend.filter(NodeAttr("t") == 0, include_targets=True).node_ids()
+    assert sorted(node_ids) == sorted([node0, node1, isolated])
+
+    # include_sources only extends with edge sources, not targets
+    node_ids = graph_backend.filter(node_ids=[node0, isolated], include_sources=True).node_ids()
+    assert sorted(node_ids) == sorted([node0, isolated])
 
 
 def test_from_ctc(
@@ -974,14 +1344,10 @@ def test_sucessors_predecessors_edge_cases(graph_backend: BaseGraph) -> None:
     assert isinstance(predecessors_dict, dict)
     assert len(predecessors_dict) == 0
 
-    # Test with non-existent attribute keys (should work but return limited columns)
-    # This depends on implementation - some might raise errors, others might ignore
-    try:
-        successors_df = graph_backend.successors(node0, attr_keys=["nonexistent"], return_attrs=True)
-        assert isinstance(successors_df, pl.DataFrame)
-    except (KeyError, AttributeError):
-        # This is also acceptable behavior
-        pass
+    # A non-existent attribute key is a lookup miss on every backend.
+    # See test_missing_attr_key_raises_key_error for the full accessor matrix.
+    with pytest.raises(KeyError):
+        graph_backend.successors(node0, attr_keys=["nonexistent"], return_attrs=True)
 
 
 def test_match_method(graph_backend: BaseGraph) -> None:
@@ -1359,7 +1725,7 @@ def test_from_other_with_edges(
 ) -> None:
     """Ensure from_other preserves structure across backend conversions."""
     # Create source graph with nodes, edges, and attributes
-    graph_backend.update_metadata(special_key="special_value")
+    graph_backend.metadata.update(special_key="special_value")
 
     graph_backend.add_node_attr_key("x", dtype=pl.Float64)
     graph_backend.add_edge_attr_key("weight", dtype=pl.Float64, default_value=-1)
@@ -1386,7 +1752,7 @@ def test_from_other_with_edges(
     assert set(new_graph.node_attr_keys()) == set(graph_backend.node_attr_keys())
     assert set(new_graph.edge_attr_keys()) == set(graph_backend.edge_attr_keys())
 
-    assert new_graph.metadata() == graph_backend.metadata()
+    assert new_graph.metadata == graph_backend.metadata
 
     assert new_graph._node_attr_schemas() == graph_backend._node_attr_schemas()
     assert new_graph._edge_attr_schemas() == graph_backend._edge_attr_schemas()
@@ -1435,6 +1801,108 @@ def test_from_other_with_edges(
     source_overlaps = {tuple(sorted(node_map[node] for node in overlap)) for overlap in graph_backend.overlaps()}
     new_overlaps = {tuple(sorted(overlap)) for overlap in new_graph.overlaps()}
     assert new_overlaps == source_overlaps
+
+
+@pytest.mark.parametrize(
+    ("target_cls", "target_kwargs"),
+    [
+        pytest.param(RustWorkXGraph, {}, id="rustworkx"),
+        pytest.param(
+            SQLGraph,
+            {
+                "drivername": "sqlite",
+                "database": ":memory:",
+                "engine_kwargs": {"connect_args": {"check_same_thread": False}},
+            },
+            id="sql",
+        ),
+        pytest.param(IndexedRXGraph, {}, id="indexed"),
+    ],
+)
+def test_from_other_preserves_schema_roundtrip(target_cls: type[BaseGraph], target_kwargs: dict[str, Any]) -> None:
+    """Test that from_other preserves node and edge attribute schemas across backends."""
+    graph = RustWorkXGraph()
+    for dtype in [
+        pl.Float16,
+        pl.Float32,
+        pl.Float64,
+        pl.Int8,
+        pl.Int16,
+        pl.Int32,
+        pl.Int64,
+        pl.UInt8,
+        pl.UInt16,
+        pl.UInt32,
+        pl.UInt64,
+        pl.Date,
+        pl.Datetime,
+        pl.Boolean,
+        pl.Array(pl.Float32, 3),
+        pl.List(pl.Int32),
+        pl.Struct({"a": pl.Int8, "b": pl.Array(pl.String, 2)}),
+        pl.String,
+        pl.Object,
+    ]:
+        graph.add_node_attr_key(f"attr_{dtype}", dtype=dtype)
+    graph.add_node(
+        {
+            "t": 0,
+            "attr_Float16": np.float16(1.5),
+            "attr_Float32": np.float32(2.5),
+            "attr_Float64": np.float64(3.5),
+            "attr_Int8": np.int8(4),
+            "attr_Int16": np.int16(5),
+            "attr_Int32": np.int32(6),
+            "attr_Int64": np.int64(7),
+            "attr_UInt8": np.uint8(8),
+            "attr_UInt16": np.uint16(9),
+            "attr_UInt32": np.uint32(10),
+            "attr_UInt64": np.uint64(11),
+            "attr_Date": pl.date(2024, 1, 1),
+            "attr_Datetime": dt.datetime(2024, 1, 1, 12, 0, 0),
+            "attr_Boolean": True,
+            "attr_Array(Float32, shape=(3,))": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            "attr_List(Int32)": [1, 2, 3],
+            "attr_Struct({'a': Int8, 'b': Array(String, shape=(2,))})": {
+                "a": 1,
+                "b": np.array(["x", "y"], dtype=object),
+            },
+            "attr_String": "test",
+            "attr_Object": {"key": "value"},
+        }
+    )
+    graph2 = target_cls.from_other(graph, **target_kwargs)
+
+    assert graph2.num_nodes() == graph.num_nodes()
+    assert set(graph2.node_attr_keys()) == set(graph.node_attr_keys())
+
+    assert graph2._node_attr_schemas() == graph._node_attr_schemas()
+    assert graph2._edge_attr_schemas() == graph._edge_attr_schemas()
+    assert graph2.node_attrs().schema == graph.node_attrs().schema
+    assert graph2.edge_attrs().schema == graph.edge_attrs().schema
+
+    graph3 = RustWorkXGraph.from_other(graph2)
+    assert graph3._node_attr_schemas() == graph._node_attr_schemas()
+    assert graph3._edge_attr_schemas() == graph._edge_attr_schemas()
+    assert graph3.node_attrs().schema == graph.node_attrs().schema
+    assert graph3.edge_attrs().schema == graph.edge_attrs().schema
+
+
+@pytest.mark.xfail(reason="This is because of the lack of support of shape-less pl.Array in write_ipc of polars.")
+def test_from_other_with_array_no_shape():
+    """Test that from_other raises an error when trying to copy array attributes without shape information."""
+    graph = RustWorkXGraph()
+    graph.add_node_attr_key("array_attr", pl.Array)
+    graph.add_node({"t": 0, "array_attr": np.array([1.0, 2.0, 3.0], dtype=np.float32)})
+
+    # This should raise an error because the schema does not include shape information
+    graph2 = SQLGraph.from_other(
+        graph, drivername="sqlite", database=":memory:", engine_kwargs={"connect_args": {"check_same_thread": False}}
+    )
+    assert graph2.num_nodes() == graph.num_nodes()
+    assert set(graph2.node_attr_keys()) == set(graph.node_attr_keys())
+    assert graph2._node_attr_schemas() == graph._node_attr_schemas()
+    assert graph2.node_attrs().schema == graph.node_attrs().schema
 
 
 @pytest.mark.parametrize(
@@ -1603,6 +2071,24 @@ def test_sql_graph_mask_update_survives_reload(tmp_path: Path) -> None:
     np.testing.assert_array_equal(stored_mask.mask, mask_data)
 
 
+def test_sql_graph_struct_dtype_survives_reload(tmp_path: Path) -> None:
+    db_path = tmp_path / "struct_graph.db"
+    graph = SQLGraph("sqlite", str(db_path))
+    graph.add_node_attr_key("measurements", pl.Struct({"score": pl.Int64, "label": pl.String}))
+
+    node_id = graph.add_node({"t": 0, "measurements": {"score": 7, "label": "A"}})
+    graph._engine.dispose()
+
+    reloaded = SQLGraph("sqlite", str(db_path))
+
+    df = reloaded.node_attrs(attr_keys=["measurements"])
+    assert df.schema["measurements"] == pl.Struct({"score": pl.Int64, "label": pl.String})
+    assert df["measurements"].to_list() == [{"score": 7, "label": "A"}]
+
+    ids = reloaded.filter(NodeAttr("measurements").struct.field("score") == 7).node_ids()
+    assert ids == [node_id]
+
+
 def test_sql_graph_max_id_restored_per_timepoint(tmp_path: Path) -> None:
     """Reloading a SQLGraph should respect existing max IDs per time point."""
     db_path = tmp_path / "id_restore.db"
@@ -1617,6 +2103,72 @@ def test_sql_graph_max_id_restored_per_timepoint(tmp_path: Path) -> None:
     next_id = reloaded.add_node({DEFAULT_ATTR_KEYS.T: 1})
 
     assert next_id == first_id + 1
+
+
+def test_sql_graph_schema_defaults_survive_reload(tmp_path: Path) -> None:
+    """Reloading a SQLGraph should preserve dtype and default schema metadata."""
+    db_path = tmp_path / "schema_defaults.db"
+    graph = SQLGraph("sqlite", str(db_path))
+
+    node_array_default = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    node_object_default = {"nested": [1, 2, 3]}
+    edge_score_default = 0.25
+
+    graph.add_node_attr_key("node_array_default", pl.Array(pl.Float32, 3), node_array_default)
+    graph.add_node_attr_key("node_object_default", pl.Object, node_object_default)
+    graph.add_edge_attr_key("edge_score_default", pl.Float32, edge_score_default)
+    graph._engine.dispose()
+
+    reloaded = SQLGraph("sqlite", str(db_path))
+
+    node_schemas = reloaded._node_attr_schemas()
+    edge_schemas = reloaded._edge_attr_schemas()
+    np.testing.assert_array_equal(node_schemas["node_array_default"].default_value, node_array_default)
+    assert node_schemas["node_array_default"].dtype == pl.Array(pl.Float32, 3)
+    assert node_schemas["node_object_default"].default_value == node_object_default
+    assert node_schemas["node_object_default"].dtype == pl.Object
+    assert edge_schemas["edge_score_default"].default_value == edge_score_default
+    assert edge_schemas["edge_score_default"].dtype == pl.Float32
+
+
+def test_sql_schema_metadata_not_copied_to_in_memory_graphs() -> None:
+    """SQL-private schema metadata should not leak into in-memory backends via from_other."""
+    sql_graph = SQLGraph("sqlite", ":memory:")
+    sql_graph.add_node_attr_key("node_array_default", pl.Array(pl.Float32, 3), np.array([1.0, 2.0, 3.0], np.float32))
+    sql_graph.add_node_attr_key("node_object_default", pl.Object, {"payload": [1, 2, 3]})
+    sql_graph.add_edge_attr_key("edge_score_default", pl.Float32, 0.25)
+
+    n1 = sql_graph.add_node(
+        {
+            "t": 0,
+            "node_array_default": np.array([1.0, 1.0, 1.0], dtype=np.float32),
+            "node_object_default": {"payload": [10]},
+        }
+    )
+    n2 = sql_graph.add_node(
+        {
+            "t": 1,
+            "node_array_default": np.array([2.0, 2.0, 2.0], dtype=np.float32),
+            "node_object_default": {"payload": [20]},
+        }
+    )
+    sql_graph.add_edge(n1, n2, {"edge_score_default": 0.75})
+
+    assert SQLGraph._PRIVATE_SQL_NODE_SCHEMA_STORE_KEY in sql_graph._private_metadata
+    assert SQLGraph._PRIVATE_SQL_EDGE_SCHEMA_STORE_KEY in sql_graph._private_metadata
+
+    rx_graph = RustWorkXGraph.from_other(sql_graph)
+    assert SQLGraph._PRIVATE_SQL_NODE_SCHEMA_STORE_KEY not in rx_graph._metadata()
+    assert SQLGraph._PRIVATE_SQL_EDGE_SCHEMA_STORE_KEY not in rx_graph._metadata()
+
+    sql_graph_roundtrip = SQLGraph.from_other(
+        rx_graph,
+        drivername="sqlite",
+        database=":memory:",
+        engine_kwargs={"connect_args": {"check_same_thread": False}},
+    )
+    assert sql_graph_roundtrip._node_attr_schemas() == sql_graph._node_attr_schemas()
+    assert sql_graph_roundtrip._edge_attr_schemas() == sql_graph._edge_attr_schemas()
 
 
 def test_compute_overlaps_invalid_threshold(graph_backend: BaseGraph) -> None:
@@ -2049,23 +2601,36 @@ def test_nodes_interface(graph_backend: BaseGraph) -> None:
     assert graph_backend.nodes[node2].to_dict() == {"t": 1, "x": 0, "y": 5}
     assert graph_backend.nodes[node3].to_dict() == {"t": 2, "x": -1, "y": -1}
 
+    # non-scalar value: setting an array attribute via the single-node interface
+    graph_backend.add_node_attr_key("pos", pl.Array(pl.Float64, 2), default_value=np.array([0.0, 0.0]))
+    graph_backend.nodes[node1]["pos"] = np.array([1.5, 2.5])
+    graph_backend.nodes[node2]["pos"] = np.array([3.0, 4.0])
+    assert list(graph_backend.nodes[node1]["pos"]) == [1.5, 2.5]
+    assert list(graph_backend.nodes[node2]["pos"]) == [3.0, 4.0]
+    assert list(graph_backend.nodes[node3]["pos"]) == [0.0, 0.0]
+
 
 def test_edges_interface(graph_backend: BaseGraph) -> None:
     """Test edge attribute access using graph.edges[edge_id]['attr'] syntax."""
     graph_backend.add_node_attr_key("x", dtype=pl.Int64, default_value=-1)
     graph_backend.add_edge_attr_key("weight", dtype=pl.Float64, default_value=0.0)
     graph_backend.add_edge_attr_key("score", dtype=pl.Float64, default_value=-1.0)
+    graph_backend.add_edge_attr_key("vector", pl.Array(pl.Float64, 2), default_value=np.array([0.0, 0.0]))
 
     # Create nodes and edges
     node1 = graph_backend.add_node({"t": 0, "x": 1})
     node2 = graph_backend.add_node({"t": 1, "x": 2})
     node3 = graph_backend.add_node({"t": 2, "x": 3})
 
-    edge1 = graph_backend.add_edge(node1, node2, {"weight": 0.5, "score": -1.0})
-    graph_backend.add_edge(node2, node3, {"weight": 0.8, "score": -1.0})
+    edge1 = graph_backend.add_edge(node1, node2, {"weight": 0.5, "score": -1.0, "vector": np.array([0.0, 0.0])})
+    graph_backend.add_edge(node2, node3, {"weight": 0.8, "score": -1.0, "vector": np.array([0.0, 0.0])})
 
     # Test getting edge attributes
     assert graph_backend.edges[edge1]["weight"] == 0.5
+
+    # non-scalar value: setting an array attribute via the single-edge interface
+    graph_backend.edges[edge1]["vector"] = np.array([1.0, 2.0])
+    assert list(graph_backend.edges[edge1]["vector"]) == [1.0, 2.0]
 
 
 def test_custom_indices(graph_backend: BaseGraph) -> None:
@@ -2328,6 +2893,108 @@ def test_remove_all_nodes_in_time_point(graph_backend: BaseGraph) -> None:
     assert time_points_after_two == {0, 2}  # t=1 should be gone
 
 
+def test_bulk_remove_nodes(graph_backend: BaseGraph) -> None:
+    """bulk_remove_nodes drops nodes, incident edges, and overlaps in one call."""
+    graph_backend.add_node_attr_key("x", dtype=pl.Float64)
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Float64)
+
+    n1 = graph_backend.add_node({"t": 0, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 1, "x": 2.0})
+    n3 = graph_backend.add_node({"t": 2, "x": 3.0})
+    n4 = graph_backend.add_node({"t": 3, "x": 4.0})
+
+    e12 = graph_backend.add_edge(n1, n2, {"weight": 0.1})
+    graph_backend.add_edge(n2, n3, {"weight": 0.2})
+    e34 = graph_backend.add_edge(n3, n4, {"weight": 0.3})
+
+    graph_backend.add_overlap(n2, n3)
+    graph_backend.add_overlap(n1, n4)
+
+    graph_backend.bulk_remove_nodes([n2, n3])
+
+    assert set(graph_backend.node_ids()) == {n1, n4}
+    remaining_edges = set(graph_backend.edge_ids())
+    assert e12 not in remaining_edges
+    assert e34 not in remaining_edges
+    assert graph_backend.num_edges() == 0
+
+    overlaps = graph_backend.overlaps()
+    assert [n1, n4] in overlaps
+    assert all(n2 not in pair and n3 not in pair for pair in overlaps)
+
+
+def test_bulk_remove_nodes_empty_is_noop(graph_backend: BaseGraph) -> None:
+    n1 = graph_backend.add_node({"t": 0})
+    graph_backend.bulk_remove_nodes([])
+    assert graph_backend.num_nodes() == 1
+    assert n1 in graph_backend.node_ids()
+
+
+def test_bulk_remove_nodes_raises_when_missing(graph_backend: BaseGraph) -> None:
+    """bulk_remove_nodes is atomic: missing IDs raise without mutating the graph."""
+    n1 = graph_backend.add_node({"t": 0})
+    n2 = graph_backend.add_node({"t": 1})
+
+    with pytest.raises(ValueError, match=r"Node .* does not exist in the graph."):
+        graph_backend.bulk_remove_nodes([n1, 99999])
+
+    assert set(graph_backend.node_ids()) == {n1, n2}
+
+
+def test_bulk_remove_nodes_emits_signal(graph_backend: BaseGraph) -> None:
+    n1 = graph_backend.add_node({"t": 0})
+    n2 = graph_backend.add_node({"t": 1})
+
+    observed: list[int] = []
+    graph_backend.node_removed.connect(lambda node_ids, _attrs: observed.extend(node_ids))
+
+    graph_backend.bulk_remove_nodes([n1, n2])
+    assert observed == [n1, n2]
+
+
+def test_bulk_remove_edges(graph_backend: BaseGraph) -> None:
+    graph_backend.add_node_attr_key("x", dtype=pl.Float64)
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Float64)
+
+    n1 = graph_backend.add_node({"t": 0, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 1, "x": 2.0})
+    n3 = graph_backend.add_node({"t": 2, "x": 3.0})
+
+    e12 = graph_backend.add_edge(n1, n2, {"weight": 0.1})
+    e23 = graph_backend.add_edge(n2, n3, {"weight": 0.2})
+    e13 = graph_backend.add_edge(n1, n3, {"weight": 0.3})
+
+    graph_backend.bulk_remove_edges([e12, e23])
+
+    assert set(graph_backend.node_ids()) == {n1, n2, n3}
+    assert set(graph_backend.edge_ids()) == {e13}
+    assert not graph_backend.has_edge(n1, n2)
+    assert not graph_backend.has_edge(n2, n3)
+    assert graph_backend.has_edge(n1, n3)
+
+
+def test_bulk_remove_edges_empty_is_noop(graph_backend: BaseGraph) -> None:
+    n1 = graph_backend.add_node({"t": 0})
+    n2 = graph_backend.add_node({"t": 1})
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Float64)
+    e = graph_backend.add_edge(n1, n2, {"weight": 0.1})
+
+    graph_backend.bulk_remove_edges([])
+    assert set(graph_backend.edge_ids()) == {e}
+
+
+def test_bulk_remove_edges_raises_when_missing(graph_backend: BaseGraph) -> None:
+    n1 = graph_backend.add_node({"t": 0})
+    n2 = graph_backend.add_node({"t": 1})
+    graph_backend.add_edge_attr_key("weight", dtype=pl.Float64)
+    e = graph_backend.add_edge(n1, n2, {"weight": 0.1})
+
+    with pytest.raises(ValueError, match=r"Edge .* does not exist in the graph."):
+        graph_backend.bulk_remove_edges([e, 99999])
+
+    assert set(graph_backend.edge_ids()) == {e}
+
+
 def _fill_mock_geff_graph(graph_backend: BaseGraph) -> None:
     graph_backend.add_node_attr_key("x", dtype=pl.Float64)
     graph_backend.add_node_attr_key("y", dtype=pl.Float64)
@@ -2341,7 +3008,7 @@ def _fill_mock_geff_graph(graph_backend: BaseGraph) -> None:
 
     graph_backend.add_edge_attr_key("weight", pl.Float16)
 
-    graph_backend.update_metadata(
+    graph_backend.metadata.update(
         shape=[1, 25, 25],
         path="path/to/image.ome.zarr",
     )
@@ -2402,11 +3069,11 @@ def test_geff_roundtrip(graph_backend: BaseGraph) -> None:
 
     geff_graph, _ = IndexedRXGraph.from_geff(output_store)
 
-    assert "geff" in geff_graph.metadata()
+    assert "geff" in geff_graph.metadata
 
     # geff metadata was not stored in original graph
-    geff_graph.metadata().pop("geff")
-    assert geff_graph.metadata() == graph_backend.metadata()
+    geff_graph.metadata.pop("geff")
+    assert geff_graph.metadata == graph_backend.metadata
 
     assert geff_graph.num_nodes() == 3
     assert geff_graph.num_edges() == 2
@@ -2423,6 +3090,55 @@ def test_geff_roundtrip(graph_backend: BaseGraph) -> None:
         rx_graph,
         geff_graph.rx_graph,
     )
+
+
+def test_geff_roundtrip_custom_metadata(graph_backend: BaseGraph) -> None:
+    """Graph metadata must survive `to_geff` when the caller supplies its own `GeffMetadata`."""
+
+    _fill_mock_geff_graph(graph_backend)
+    graph_backend.metadata["shape"] = (5, 100, 100)
+
+    # a downstream library supplying its own metadata: same props as the auto-generated
+    # one, but with its own `extra` namespace instead of tracksdata's.
+    reference_store = MemoryStore()
+    graph_backend.to_geff(geff_store=reference_store)
+    custom_metadata = GeffMetadata.read(reference_store)
+    custom_metadata.extra = {"downstream": {"hello": "world"}}
+
+    output_store = MemoryStore()
+    graph_backend.to_geff(geff_store=output_store, geff_metadata=custom_metadata)
+
+    written_metadata = GeffMetadata.read(output_store)
+    # the caller's own namespace is untouched ...
+    assert written_metadata.extra["downstream"] == {"hello": "world"}
+    # ... and the graph metadata rode along. `shape` is a list, not a tuple, because
+    # the extras are serialized as JSON.
+    assert written_metadata.extra["tracksdata"]["shape"] == [5, 100, 100]
+
+    geff_graph, _ = IndexedRXGraph.from_geff(output_store)
+    assert geff_graph.metadata["shape"] == [5, 100, 100]
+
+    # the metadata object the caller passed in was not modified
+    assert custom_metadata.extra == {"downstream": {"hello": "world"}}
+
+
+def test_geff_custom_metadata_overrides_graph_metadata(graph_backend: BaseGraph) -> None:
+    """On key collisions the caller-supplied `extra["tracksdata"]` wins."""
+
+    _fill_mock_geff_graph(graph_backend)
+    graph_backend.metadata["shape"] = (5, 100, 100)
+
+    reference_store = MemoryStore()
+    graph_backend.to_geff(geff_store=reference_store)
+    custom_metadata = GeffMetadata.read(reference_store)
+    custom_metadata.extra = {"tracksdata": {"shape": [1, 2, 3], "extra_key": "value"}}
+
+    output_store = MemoryStore()
+    graph_backend.to_geff(geff_store=output_store, geff_metadata=custom_metadata)
+
+    geff_graph, _ = IndexedRXGraph.from_geff(output_store)
+    assert geff_graph.metadata["shape"] == [1, 2, 3]
+    assert geff_graph.metadata["extra_key"] == "value"
 
 
 def test_geff_overwrite(graph_backend: BaseGraph, tmp_path: Path) -> None:
@@ -2461,11 +3177,11 @@ def test_geff_with_keymapping(graph_backend: BaseGraph) -> None:
         edge_attr_key_map={"weight": "weight_new"},
     )
 
-    assert "geff" in geff_graph.metadata()
+    assert "geff" in geff_graph.metadata
 
     # geff metadata was not stored in original graph
-    geff_graph.metadata().pop("geff")
-    assert geff_graph.metadata() == graph_backend.metadata()
+    geff_graph.metadata.pop("geff")
+    assert geff_graph.metadata == graph_backend.metadata
 
     assert geff_graph.num_nodes() == 3
     assert geff_graph.num_edges() == 2
@@ -2502,32 +3218,56 @@ def test_metadata_multiple_dtypes(graph_backend: BaseGraph) -> None:
     }
 
     # Update metadata with all test values
-    graph_backend.update_metadata(**test_metadata)
+    graph_backend.metadata.update(**test_metadata)
 
     # Retrieve and verify
-    retrieved = graph_backend.metadata()
+    retrieved = graph_backend.metadata
 
     for key, expected_value in test_metadata.items():
         assert key in retrieved, f"Key '{key}' not found in metadata"
         assert retrieved[key] == expected_value, f"Value mismatch for '{key}': {retrieved[key]} != {expected_value}"
 
     # Test updating existing keys
-    graph_backend.update_metadata(string="updated_value", new_key="new_value")
-    retrieved = graph_backend.metadata()
+    graph_backend.metadata.update(string="updated_value", new_key="new_value")
+    retrieved = graph_backend.metadata
 
     assert retrieved["string"] == "updated_value"
     assert retrieved["new_key"] == "new_value"
     assert retrieved["integer"] == 42  # Other values unchanged
 
     # Testing removing metadata
-    graph_backend.remove_metadata("string")
-    retrieved = graph_backend.metadata()
+    graph_backend.metadata.pop("string", None)
+    retrieved = graph_backend.metadata
     assert "string" not in retrieved
 
-    graph_backend.remove_metadata("mixed_list")
-    retrieved = graph_backend.metadata()
+    graph_backend.metadata.pop("mixed_list", None)
+    retrieved = graph_backend.metadata
     assert "string" not in retrieved
     assert "mixed_list" not in retrieved
+
+
+def test_private_metadata_is_hidden_from_public_apis(graph_backend: BaseGraph) -> None:
+    private_key = "__private_dtype_map"
+
+    graph_backend._private_metadata.update(**{private_key: {"x": "float64"}})
+    graph_backend.metadata.update(shape=[1, 2, 3])
+
+    public_metadata = graph_backend.metadata
+    assert private_key not in public_metadata
+    assert public_metadata["shape"] == [1, 2, 3]
+
+    with pytest.raises(ValueError, match="reserved for internal use"):
+        graph_backend.metadata.update(**{private_key: {"x": "int64"}})
+
+    with pytest.raises(ValueError, match="reserved for internal use"):
+        graph_backend.metadata.pop(private_key, None)
+
+    with pytest.raises(ValueError, match="is not private"):
+        graph_backend._private_metadata.update(shape=[1, 2, 3])
+
+    # Private metadata view can remove private keys.
+    graph_backend._private_metadata.pop(private_key, None)
+    assert private_key not in graph_backend._metadata()
 
 
 def test_pickle_roundtrip(graph_backend: BaseGraph) -> None:
@@ -2607,7 +3347,7 @@ def test_to_traccuracy_graph(graph_backend: BaseGraph) -> None:
     graph_backend.add_node_attr_key("y", pl.Float64)
     graph_backend.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, pl.Object)
     graph_backend.add_node_attr_key(DEFAULT_ATTR_KEYS.BBOX, pl.Array(pl.Int64, 4))
-    graph_backend.update_metadata(shape=[3, 25, 25])
+    graph_backend.metadata.update(shape=[3, 25, 25])
 
     # Create masks for first graph
     mask1_data = np.array([[True, True], [True, True]], dtype=bool)
@@ -2636,6 +3376,8 @@ def test_to_traccuracy_graph(graph_backend: BaseGraph) -> None:
     graph_backend.add_edge(node1, node3, {"weight": 0.3})
 
     traccuracy_graph = graph_backend.to_traccuracy_graph()
+
+    assert traccuracy_graph.location_keys == ["y", "x"]
 
     # trivial matching with itself
     ctc_results, _ = run_metrics(
@@ -2677,3 +3419,259 @@ def test_array_default_values(graph_backend: BaseGraph) -> None:
     assert node_attrs.shape == (3, 4)
     for col, dtype in node_attrs.schema.items():
         assert dtype == graph_backend._node_attr_schemas()[col].dtype
+
+
+def test_dividing_nodes(graph_backend: BaseGraph) -> None:
+    """Test that dividing_nodes returns exactly the nodes with out-degree 2."""
+    # node0 divides into node1 and node2; node1 continues linearly; node3 is a leaf
+    node0 = graph_backend.add_node({"t": 0})
+    node1 = graph_backend.add_node({"t": 1})
+    node2 = graph_backend.add_node({"t": 1})
+    node3 = graph_backend.add_node({"t": 2})
+    node4 = graph_backend.add_node({"t": 2})
+
+    graph_backend.add_edge(node0, node1, {})
+    graph_backend.add_edge(node0, node2, {})  # node0 divides
+    graph_backend.add_edge(node1, node3, {})  # node1 continues linearly
+    graph_backend.add_edge(node2, node4, {})  # node2 continues linearly
+
+    assert set(graph_backend.dividing_nodes()) == {node0}
+
+    # After adding a second child to node1, it should also be a dividing node
+    node5 = graph_backend.add_node({"t": 2})
+    graph_backend.add_edge(node1, node5, {})
+
+    assert set(graph_backend.dividing_nodes()) == {node0, node1}
+
+
+# ---------------------------------------------------------------------------
+# SQLGraph.from_other specialization (issue #285)
+# ---------------------------------------------------------------------------
+
+
+def _populate_sql_graph(graph: SQLGraph, n_per_time: int = 4, n_times: int = 3) -> None:
+    """Populate a graph with nodes, edges, and overlaps for round-trip testing."""
+    graph.add_node_attr_key("x", dtype=pl.Float64)
+    graph.add_node_attr_key("label", dtype=pl.String, default_value="?")
+    graph.add_node_attr_key("blob", dtype=pl.Object, default_value=None)
+    graph.add_edge_attr_key("weight", dtype=pl.Float64, default_value=0.0)
+    graph.add_edge_attr_key("kind", dtype=pl.String, default_value="forward")
+
+    nodes_per_t: list[list[int]] = []
+    for t in range(n_times):
+        ids = []
+        for k in range(n_per_time):
+            node_id = graph.add_node(
+                {
+                    "t": t,
+                    "x": float(t * 10 + k),
+                    "label": f"t{t}_n{k}",
+                    "blob": {"t": t, "k": k},
+                }
+            )
+            ids.append(node_id)
+        nodes_per_t.append(ids)
+
+    # Edges between consecutive time points (full bipartite for some, sparse for others).
+    for t in range(n_times - 1):
+        for src in nodes_per_t[t]:
+            for dst in nodes_per_t[t + 1]:
+                graph.add_edge(
+                    src,
+                    dst,
+                    {"weight": float(src + dst), "kind": "forward" if src <= dst else "skip"},
+                )
+
+    # Overlaps within each time point.
+    for ids in nodes_per_t:
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                graph.add_overlap(ids[i], ids[j])
+
+
+def _assert_graphs_equivalent(src: BaseGraph, dst: BaseGraph) -> None:
+    """Assert that two graphs match in structure, schemas, and overlaps."""
+    assert dst.num_nodes() == src.num_nodes()
+    assert dst.num_edges() == src.num_edges()
+    assert set(dst.node_attr_keys()) == set(src.node_attr_keys())
+    assert set(dst.edge_attr_keys()) == set(src.edge_attr_keys())
+    assert dst._node_attr_schemas() == src._node_attr_schemas()
+    assert dst._edge_attr_schemas() == src._edge_attr_schemas()
+    assert dst.metadata == src.metadata
+
+    # Compare node payloads keyed on (t, x) which is unique in our fixtures.
+    src_nodes = src.node_attrs().sort([DEFAULT_ATTR_KEYS.T, "x"])
+    dst_nodes = dst.node_attrs().sort([DEFAULT_ATTR_KEYS.T, "x"])
+    assert src_nodes.select(["t", "x", "label"]).equals(dst_nodes.select(["t", "x", "label"]))
+
+    # Edge attributes (ignoring auto-generated edge_id ordering).
+    src_edges = src.edge_attrs(attr_keys=["weight", "kind"]).sort(["weight", "kind"])
+    dst_edges = dst.edge_attrs(attr_keys=["weight", "kind"]).sort(["weight", "kind"])
+    assert src_edges.select(["weight", "kind"]).equals(dst_edges.select(["weight", "kind"]))
+
+    src_overlaps = {tuple(sorted(o)) for o in src.overlaps()}
+    dst_overlaps = {tuple(sorted(o)) for o in dst.overlaps()}
+    assert src_overlaps == dst_overlaps
+
+    # Node ids are preserved because both backends support custom indices.
+    assert sorted(dst.node_ids()) == sorted(src.node_ids())
+
+
+def test_sql_from_other_uses_attach_dump_for_sqlite(tmp_path: Path) -> None:
+    """SQLGraph→SQLGraph on disk should use the ATTACH-based fast path and skip
+    the generic BaseGraph copy.
+    """
+    src_db = tmp_path / "src.db"
+    dst_db = tmp_path / "dst.db"
+
+    src = SQLGraph(drivername="sqlite", database=str(src_db))
+    _populate_sql_graph(src, n_per_time=3, n_times=4)
+    src.metadata.update(experiment="issue-285")
+
+    # Spy on the BaseGraph.from_other to confirm we don't fall back to it.
+    from tracksdata.graph import _base_graph as _bg
+
+    base_calls: list[tuple] = []
+    original = _bg.BaseGraph.from_other.__func__
+
+    def _tracking(cls, other, **kwargs):  # type: ignore[no-untyped-def]
+        base_calls.append((cls, type(other).__name__))
+        return original(cls, other, **kwargs)
+
+    _bg.BaseGraph.from_other = classmethod(_tracking)
+    try:
+        dst = SQLGraph.from_other(src, drivername="sqlite", database=str(dst_db))
+    finally:
+        _bg.BaseGraph.from_other = classmethod(original)
+
+    assert base_calls == [], f"specialized path should bypass BaseGraph.from_other, got {base_calls}"
+    assert dst_db.exists()
+    _assert_graphs_equivalent(src, dst)
+    dst._engine.dispose()
+
+
+def _make_sql_disk_source(tmp_path: Path) -> BaseGraph:
+    return SQLGraph(drivername="sqlite", database=str(tmp_path / "src.db"))
+
+
+def _make_sql_memory_source(tmp_path: Path) -> BaseGraph:
+    return SQLGraph(
+        drivername="sqlite",
+        database=":memory:",
+        engine_kwargs={"connect_args": {"check_same_thread": False}},
+    )
+
+
+def _make_rustworkx_source(tmp_path: Path) -> BaseGraph:
+    return RustWorkXGraph()
+
+
+@pytest.mark.parametrize(
+    "make_source",
+    [
+        pytest.param(_make_sql_disk_source, id="sql-disk"),
+        pytest.param(_make_sql_memory_source, id="sql-memory"),
+        pytest.param(_make_rustworkx_source, id="rustworkx"),
+    ],
+)
+def test_sql_from_other_subgraph_view_with_overlaps(
+    make_source: Callable[[Path], BaseGraph],
+    tmp_path: Path,
+) -> None:
+    """Reproduce issue #285: filtering a graph then ``from_other`` to a new
+    on-disk SQLGraph must work even when the selection contains many node ids
+    and overlaps, regardless of the source backend.
+    """
+    dst_db = tmp_path / "dst.db"
+
+    src = make_source(tmp_path)
+    src.add_node_attr_key("verification_status", dtype=pl.Int32, default_value=0)
+
+    # Force enough nodes to push the overlap query past sqlite's variable limit
+    # if it were submitted as a single IN(...) clause (default 999).
+    n_per_time = 80
+    n_times = 30
+    expected_verified = 0
+    for t in range(n_times):
+        for k in range(n_per_time):
+            status = 1 if (t + k) % 2 == 0 else 0
+            node_id = src.add_node({"t": t, "verification_status": status})
+            if status == 1:
+                expected_verified += 1
+            # Add a few overlaps within each time point.
+            if k > 0:
+                prev = node_id - 1
+                src.add_overlap(prev, node_id)
+
+    assert expected_verified > 999, "test must exceed sqlite's variable limit to be meaningful"
+
+    subgraph = src.filter(NodeAttr("verification_status") == 1).subgraph()
+    dst = SQLGraph.from_other(subgraph, drivername="sqlite", database=str(dst_db))
+
+    assert dst.num_nodes() == expected_verified
+    # Only overlaps between two verified nodes survive.
+    expected_overlaps = {
+        tuple(sorted(o))
+        for o in src.overlaps()
+        if all(src.filter(node_ids=[nid]).node_attrs(attr_keys=["verification_status"]).item(0, 0) == 1 for nid in o)
+    }
+    actual_overlaps = {tuple(sorted(o)) for o in dst.overlaps()}
+    assert actual_overlaps == expected_overlaps
+    dst._engine.dispose()
+
+
+def test_sql_from_other_falls_back_for_in_memory_destination() -> None:
+    """`:memory:` destinations cannot be ATTACHed across connections, so the
+    generic path must still be used.
+    """
+    src = SQLGraph(drivername="sqlite", database=":memory:")
+    _populate_sql_graph(src, n_per_time=2, n_times=2)
+
+    dst = SQLGraph.from_other(
+        src,
+        drivername="sqlite",
+        database=":memory:",
+        engine_kwargs={"connect_args": {"check_same_thread": False}},
+    )
+
+    _assert_graphs_equivalent(src, dst)
+
+
+def test_sql_from_other_falls_back_for_non_sql_source(tmp_path: Path) -> None:
+    """A non-SQL source must still produce a populated SQLGraph via the base path."""
+    src = RustWorkXGraph()
+    src.add_node_attr_key("x", dtype=pl.Float64)
+    n0 = src.add_node({"t": 0, "x": 1.0})
+    n1 = src.add_node({"t": 1, "x": 2.0})
+    src.add_edge(n0, n1, {})
+    src.add_overlap(n0, n0)  # self-overlap is allowed by the API
+
+    dst = SQLGraph.from_other(src, drivername="sqlite", database=str(tmp_path / "dst.db"))
+    assert dst.num_nodes() == src.num_nodes()
+    assert dst.num_edges() == src.num_edges()
+    assert {tuple(sorted(o)) for o in dst.overlaps()} == {tuple(sorted(o)) for o in src.overlaps()}
+    dst._engine.dispose()
+
+
+def test_sql_overlaps_chunks_large_node_id_filter(tmp_path: Path) -> None:
+    """`SQLGraph.overlaps(node_ids=...)` must not hit the bound-parameter limit."""
+    db_path = tmp_path / "g.db"
+    graph = SQLGraph(drivername="sqlite", database=str(db_path))
+
+    # Add enough nodes for the IN(...) clause to overflow if not chunked.
+    pairs = []
+    for t in range(20):
+        last = None
+        for _ in range(120):
+            current = graph.add_node({"t": t})
+            if last is not None:
+                graph.add_overlap(last, current)
+                pairs.append(tuple(sorted((last, current))))
+            last = current
+
+    all_node_ids = graph.node_ids()
+    assert len(all_node_ids) > 999  # exceed the default sqlite variable limit
+
+    overlaps = graph.overlaps(node_ids=all_node_ids)
+    assert {tuple(sorted(o)) for o in overlaps} == set(pairs)
+    graph._engine.dispose()

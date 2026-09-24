@@ -5,10 +5,11 @@ from typing import Any
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
+from polars.datatypes import numpy_char_code_to_dtype
 from skimage.measure._regionprops import RegionProperties, regionprops
 from typing_extensions import override
 
-from tracksdata.constants import DEFAULT_ATTR_KEYS
+from tracksdata.constants import DEFAULT_ATTR_KEYS, DEFAULT_METADATA_KEYS
 from tracksdata.graph._base_graph import BaseGraph
 from tracksdata.nodes._base_nodes import BaseNodesOperator
 from tracksdata.nodes._mask import Mask
@@ -123,24 +124,25 @@ class RegionPropsNodes(BaseNodesOperator):
         else:
             raise ValueError(f"`labels` must be 't + 2D' or 't + 3D', got '{labels.ndim}' dimensions.")
 
-    def _init_node_attrs(self, graph: BaseGraph, axis_names: list[str], ndims: int) -> None:
+    def _init_node_attrs(self, graph: BaseGraph, node_attrs: dict[str, Any]) -> None:
         """
         Initialize the node attributes for the graph.
         """
-        if DEFAULT_ATTR_KEYS.MASK not in graph.node_attr_keys():
-            graph.add_node_attr_key(DEFAULT_ATTR_KEYS.MASK, pl.Object)
-
-        if DEFAULT_ATTR_KEYS.BBOX not in graph.node_attr_keys():
-            bbox_size = 2 * (ndims - 1)
-            graph.add_node_attr_key(DEFAULT_ATTR_KEYS.BBOX, pl.Array(pl.Int64, bbox_size))
-
-        if "label" in self.attr_keys() and "label" not in graph.node_attr_keys():
-            graph.add_node_attr_key("label", pl.Int64, 0)
-
-        # initialize the remaining attribute keys
-        for attr_key in axis_names + self.attr_keys():
-            if attr_key not in graph.node_attr_keys():
-                graph.add_node_attr_key(attr_key, pl.Float64, -1.0)
+        node_attr_keys = graph.node_attr_keys(return_ids=True)
+        for key, value in node_attrs.items():
+            if key not in node_attr_keys:
+                if isinstance(value, np.ndarray):
+                    default_value = np.zeros_like(value)
+                    graph.add_node_attr_key(
+                        key, pl.Array(numpy_char_code_to_dtype(value.dtype), value.shape), default_value
+                    )
+                elif np.isscalar(value):
+                    dtype = numpy_char_code_to_dtype(value.dtype) if hasattr(value, "dtype") else type(value)
+                    graph.add_node_attr_key(key, dtype)
+                elif type(value).__module__ != "builtins":
+                    graph.add_node_attr_key(key, pl.Object)
+                else:
+                    graph.add_node_attr_key(key, type(value))
 
     def attr_keys(self) -> list[str]:
         """
@@ -200,6 +202,15 @@ class RegionPropsNodes(BaseNodesOperator):
             intensity-based properties. Must have the same shape as labels
             (excluding the label values).
 
+        Raises
+        ------
+        ValueError
+            If the graph already has a `scale` metadata entry that differs from
+            this operator's `spacing`. Region properties such as `perimeter` or
+            `axis_major_length` are computed using `spacing`, so a mismatch would
+            silently make the graph's `scale` metadata describe a different
+            resolution than the one used to compute them.
+
         Examples
         --------
         Add nodes from a single 2D labeled image:
@@ -227,11 +238,25 @@ class RegionPropsNodes(BaseNodesOperator):
         node_op.add_nodes(graph, labels=labels, t=0, intensity_image=fluorescence_image)
         ```
         """
-        axis_names = self._axis_names(labels)
-        self._init_node_attrs(graph, axis_names, ndims=labels.ndim)
+        existing_shape = graph.metadata.get(DEFAULT_METADATA_KEYS.SHAPE)
+        if existing_shape is None:
+            graph.metadata.update(**{DEFAULT_METADATA_KEYS.SHAPE: labels.shape})
+        elif tuple(existing_shape) != tuple(labels.shape):
+            LOG.warning(
+                "Graph metadata `shape` is %s, which does not match `labels.shape` %s.",
+                tuple(existing_shape),
+                tuple(labels.shape),
+            )
 
-        if "shape" not in graph.metadata():
-            graph.update_metadata(shape=labels.shape)
+        if self._spacing is not None:
+            existing_scale = graph.metadata.get(DEFAULT_METADATA_KEYS.SCALE)
+            if existing_scale is None:
+                graph.metadata.update(**{DEFAULT_METADATA_KEYS.SCALE: self._spacing})
+            elif tuple(existing_scale) != tuple(self._spacing):
+                raise ValueError(
+                    f"Graph metadata `scale` is {tuple(existing_scale)}, which does not match "
+                    f"this operator's `spacing` {tuple(self._spacing)}."
+                )
 
         if t is None:
             time_points = range(labels.shape[0])
@@ -239,11 +264,14 @@ class RegionPropsNodes(BaseNodesOperator):
             time_points = [t]
 
         node_ids = []
+        initialized = False
         for nodes_data in multiprocessing_apply(
             func=partial(self._nodes_per_time, labels=labels, intensity_image=intensity_image),
             sequence=time_points,
             desc="Adding region properties nodes",
         ):
+            if not initialized and len(nodes_data):
+                self._init_node_attrs(graph, nodes_data[0])
             node_ids.extend(graph.bulk_add_nodes(nodes_data))
 
     def _nodes_per_time(

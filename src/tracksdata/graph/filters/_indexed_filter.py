@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
-from tracksdata.attrs import AttrComparison
+from tracksdata.attrs import Filter
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.graph._rustworkx_graph import (
     IndexedRXGraph,
@@ -13,7 +13,7 @@ from tracksdata.graph._rustworkx_graph import (
 from tracksdata.utils._cache import cache_method
 
 if TYPE_CHECKING:
-    from tracksdata.graph._graph_view import GraphView
+    from tracksdata.graph._graph_view import GraphView, ViewMode
 
 
 class IndexRXFilter(RXFilter):
@@ -21,7 +21,7 @@ class IndexRXFilter(RXFilter):
 
     def __init__(
         self,
-        *attr_comps: AttrComparison,
+        *attr_comps: Filter,
         graph: "GraphView | IndexedRXGraph",
         node_ids: Sequence[int] | None = None,
         include_targets: bool = False,
@@ -52,8 +52,10 @@ class IndexRXFilter(RXFilter):
         self,
         node_attr_keys: Sequence[str] | str | None = None,
         edge_attr_keys: Sequence[str] | str | None = None,
+        *,
+        mode: "ViewMode | None" = None,
     ) -> "GraphView":
-        from tracksdata.graph._graph_view import GraphView
+        from tracksdata.graph._graph_view import GraphView, ViewMode
 
         node_ids = self.node_ids()
 
@@ -72,6 +74,7 @@ class IndexRXFilter(RXFilter):
             rx_graph,
             node_map_to_root=dict(node_map.items()),
             root=root,
+            mode=mode if mode is not None else ViewMode.WRITE_THROUGH,
             node_attr_keys=node_attr_keys,
             edge_attr_keys=edge_attr_keys,
         )

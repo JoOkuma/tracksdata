@@ -1,3 +1,5 @@
+import gc
+import itertools
 import re
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -10,7 +12,7 @@ import pytest
 
 from tracksdata.attrs import EdgeAttr, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
-from tracksdata.graph import BaseGraph, GraphView, SQLGraph
+from tracksdata.graph import BaseGraph, GraphView, RustWorkXGraph, SQLGraph, ViewMode
 from tracksdata.graph._mapped_graph_mixin import MappedGraphMixin
 from tracksdata.utils._logging import LOG
 
@@ -473,6 +475,43 @@ def test_subgraph_add_node(graph_backend: BaseGraph) -> None:
         assert attributes["label"].to_list()[0] == "NEW"
 
 
+def test_subgraph_bulk_add_nodes_emits_batched_node_added_callbacks(graph_backend: BaseGraph) -> None:
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+    subgraph = graph_with_data.filter(node_ids=graph_with_data._test_nodes[:2]).subgraph()  # type: ignore
+
+    root_calls: list[tuple[object, object]] = []
+    subgraph_calls: list[tuple[object, object]] = []
+    graph_with_data.node_added.connect(lambda node_ids, attrs: root_calls.append((node_ids, attrs)))
+    subgraph.node_added.connect(lambda node_ids, attrs: subgraph_calls.append((node_ids, attrs)))
+
+    nodes = [
+        {"t": 10, "x": 10.0, "y": 10.0, "label": "A"},
+        {"t": 11, "x": 11.0, "y": 11.0, "label": "B"},
+    ]
+    node_ids = subgraph.bulk_add_nodes(nodes)
+
+    assert len(root_calls) == 1
+    assert len(subgraph_calls) == 1
+    assert root_calls[0] == (node_ids, nodes)
+    assert subgraph_calls[0] == (node_ids, nodes)
+
+
+def test_subgraph_update_node_attrs_emits_batched_node_updated_callback(graph_backend: BaseGraph) -> None:
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+    subgraph = graph_with_data.filter(node_ids=graph_with_data._test_nodes[:3]).subgraph()  # type: ignore
+    node_ids = graph_with_data._test_nodes[:2]  # type: ignore
+
+    calls: list[tuple[object, object, object]] = []
+    subgraph.node_updated.connect(lambda node_ids, old_attrs, new_attrs: calls.append((node_ids, old_attrs, new_attrs)))
+
+    subgraph.update_node_attrs(node_ids=node_ids, attrs={"x": [10.0, 20.0]})
+
+    assert len(calls) == 1
+    assert calls[0][0] == node_ids
+    assert [attrs["x"] for attrs in calls[0][1]] == [0.0, 1.0]
+    assert [attrs["x"] for attrs in calls[0][2]] == [10.0, 20.0]
+
+
 def test_subgraph_add_edge(graph_backend: BaseGraph) -> None:
     """Test adding edges to a subgraph."""
     graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
@@ -739,6 +778,98 @@ def test_homemorphism(graph_backend: BaseGraph) -> None:
 
     assert same_graph.node_ids() == graph_with_data.node_ids()
     assert same_graph.edge_ids() == graph_with_data.edge_ids()
+
+
+@parametrize_subgraph_tests
+def test_filter_nodes_with_or_attr_filter(
+    graph_backend: BaseGraph,
+    use_subgraph: bool,
+) -> None:
+    """OR-combined node filter selects the union of matching nodes."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph)
+    node_attrs = graph_with_data.node_attrs()
+
+    nodes = graph_with_data.filter((NodeAttr("t") == 1) | (NodeAttr("t") == 3)).node_ids()
+    expected = node_attrs.filter(pl.col("t").is_in([1, 3]))[DEFAULT_ATTR_KEYS.NODE_ID].to_list()
+    assert set(nodes) == set(expected)
+
+
+@parametrize_subgraph_tests
+def test_filter_nodes_with_not_attr_filter(
+    graph_backend: BaseGraph,
+    use_subgraph: bool,
+) -> None:
+    """NOT (inverted) node filter selects the complement of matching nodes."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph)
+    node_attrs = graph_with_data.node_attrs()
+
+    nodes = graph_with_data.filter(~(NodeAttr("label") == "A")).node_ids()
+    expected = node_attrs.filter(pl.col("label") != "A")[DEFAULT_ATTR_KEYS.NODE_ID].to_list()
+    assert set(nodes) == set(expected)
+
+
+@parametrize_subgraph_tests
+def test_filter_nodes_with_xor_attr_filter(
+    graph_backend: BaseGraph,
+    use_subgraph: bool,
+) -> None:
+    """XOR node filter selects nodes matching exactly one of the conditions."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph)
+    node_attrs = graph_with_data.node_attrs()
+
+    nodes = graph_with_data.filter((NodeAttr("t") == 2) ^ (NodeAttr("label") == "A")).node_ids()
+    expected = node_attrs.filter((pl.col("t") == 2) ^ (pl.col("label") == "A"))[DEFAULT_ATTR_KEYS.NODE_ID].to_list()
+    assert set(nodes) == set(expected)
+
+
+@parametrize_subgraph_tests
+def test_filter_nodes_with_nested_compound(
+    graph_backend: BaseGraph,
+    use_subgraph: bool,
+) -> None:
+    """Nested AND/OR filter trees evaluate correctly."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph)
+    node_attrs = graph_with_data.node_attrs()
+
+    nodes = graph_with_data.filter(
+        (NodeAttr("label") == "A") & ((NodeAttr("t") == 1) | (NodeAttr("t") == 3))
+    ).node_ids()
+    expected = node_attrs.filter((pl.col("label") == "A") & (pl.col("t").is_in([1, 3])))[
+        DEFAULT_ATTR_KEYS.NODE_ID
+    ].to_list()
+    assert set(nodes) == set(expected)
+
+
+def test_filter_edges_with_or_attr_filter(graph_backend: BaseGraph) -> None:
+    """OR-combined edge filter selects the union of matching edges."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+    edge_attrs = graph_with_data.edge_attrs()
+
+    edge_filter = graph_with_data.filter((EdgeAttr("weight") < 0.4) | (EdgeAttr("weight") > 0.8))
+    selected_edges = edge_filter.edge_attrs()[DEFAULT_ATTR_KEYS.EDGE_ID].to_list()
+    expected = edge_attrs.filter((pl.col("weight") < 0.4) | (pl.col("weight") > 0.8))[
+        DEFAULT_ATTR_KEYS.EDGE_ID
+    ].to_list()
+    assert set(selected_edges) == set(expected)
+
+
+def test_filter_subgraph_with_or_attr_filter(graph_backend: BaseGraph) -> None:
+    """Building a subgraph from a compound (OR) filter yields the expected nodes/edges."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+    node_attrs = graph_with_data.node_attrs()
+
+    sub = graph_with_data.filter((NodeAttr("t") == 1) | (NodeAttr("t") == 2)).subgraph()
+    expected = node_attrs.filter(pl.col("t").is_in([1, 2]))[DEFAULT_ATTR_KEYS.NODE_ID].to_list()
+    assert set(sub.node_ids()) == set(expected)
+
+
+def test_filter_compound_mixed_node_and_edge_raises(graph_backend: BaseGraph) -> None:
+    """A single compound filter cannot mix node and edge attributes."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+
+    bad_filter = (NodeAttr("t") == 1) | (EdgeAttr("weight") > 0.5)
+    with pytest.raises(ValueError, match="cannot mix NodeAttr and EdgeAttr"):
+        graph_with_data.filter(bad_filter).node_ids()
 
 
 @parametrize_subgraph_tests
@@ -1143,6 +1274,430 @@ def test_graph_view_remove_edge(graph_backend: BaseGraph) -> None:
         view.remove_edge()
 
 
+def test_remove_node_from_view_basic(graph_backend: BaseGraph) -> None:
+    """`remove_node_from_view` drops the node from the view but leaves the root untouched."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    graph_backend.add_edge_attr_key("weight", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 2, "x": 2.0})
+    graph_backend.add_edge(n0, n1, {"weight": 0.2})
+    graph_backend.add_edge(n1, n2, {"weight": 0.8})
+
+    view = graph_backend.filter().subgraph()
+    assert isinstance(view, GraphView)
+
+    view.remove_node_from_view(n1)
+
+    # View no longer has the node or its incident edges
+    assert n1 not in view.node_ids()
+    assert not view.has_node(n1)
+    assert not view.has_edge(n0, n1)
+    assert not view.has_edge(n1, n2)
+
+    # Edge bookkeeping is cleaned in the view
+    view_edge_root_ids = set(view._edge_map_to_root.values())
+    assert graph_backend.edge_id(n0, n1) not in view_edge_root_ids
+    assert graph_backend.edge_id(n1, n2) not in view_edge_root_ids
+
+    # Root is untouched
+    assert n1 in graph_backend.node_ids()
+    assert graph_backend.has_node(n1)
+    assert graph_backend.has_edge(n0, n1)
+    assert graph_backend.has_edge(n1, n2)
+
+
+def test_remove_node_from_view_traversals_still_work(graph_backend: BaseGraph) -> None:
+    """`_out_of_sync` is not set: successors/predecessors still work after view-only removal."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 2, "x": 2.0})
+    graph_backend.add_edge(n0, n1, {})
+    graph_backend.add_edge(n1, n2, {})
+
+    view = graph_backend.filter().subgraph()
+    view.remove_node_from_view(n1)
+
+    assert view._out_of_sync is False
+    # Should not raise
+    view.successors(n0)
+    view.predecessors(n2)
+
+
+def test_remove_node_from_view_signals(graph_backend: BaseGraph) -> None:
+    """Only the view's `node_removed` fires; the root's signal does not."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+
+    view = graph_backend.filter().subgraph()
+
+    # `node_removed` is a Signal(list, list); slots iterate the batch exactly like
+    # the real consumers (SpatialFilter._remove_node, GraphArrayView._on_node_removed).
+    # A non-iterating slot would silently accept a buggy scalar emit — these don't.
+    view_calls: list[tuple[int, dict]] = []
+    root_calls: list[tuple[int, dict]] = []
+
+    def _record(sink: list, node_ids: list[int], old_attrs: list[dict]) -> None:
+        for nid, attrs in zip(node_ids, old_attrs, strict=True):
+            sink.append((nid, attrs))
+
+    view.node_removed.connect(lambda node_ids, old_attrs: _record(view_calls, node_ids, old_attrs))
+    graph_backend.node_removed.connect(lambda node_ids, old_attrs: _record(root_calls, node_ids, old_attrs))
+
+    view.remove_node_from_view(n1)
+
+    assert len(root_calls) == 0
+    assert len(view_calls) == 1
+    assert view_calls[0][0] == n1
+    assert view_calls[0][1]["x"] == 1.0
+    # Root still has the node — the view-only removal did not touch it
+    assert graph_backend.has_node(n1)
+    # n0 is unaffected
+    _ = n0
+
+
+def test_remove_node_from_view_validation(graph_backend: BaseGraph) -> None:
+    """Missing node raises ValueError; sync=False raises RuntimeError."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+
+    view = graph_backend.filter().subgraph()
+
+    with pytest.raises(ValueError, match=r"Node 999999 does not exist in the graph\."):
+        view.remove_node_from_view(999999)
+
+    view.sync = False
+    with pytest.raises(RuntimeError, match=r"remove_node_from_view requires sync=True"):
+        view.remove_node_from_view(n0)
+
+
+def test_remove_edge_from_view_basic(graph_backend: BaseGraph) -> None:
+    """`remove_edge_from_view` drops the edge from the view but leaves the root edge intact."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    graph_backend.add_edge_attr_key("weight", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 2, "x": 2.0})
+    graph_backend.add_edge(n0, n1, {"weight": 0.2})
+    graph_backend.add_edge(n1, n2, {"weight": 0.8})
+
+    # Remove by endpoints
+    view = graph_backend.filter().subgraph()
+    view.remove_edge_from_view(n0, n1)
+    assert not view.has_edge(n0, n1)
+    assert graph_backend.has_edge(n0, n1)
+    # Other edge unaffected
+    assert view.has_edge(n1, n2)
+
+    # Remove by edge_id on a fresh view
+    view2 = graph_backend.filter().subgraph()
+    eid = graph_backend.edge_id(n1, n2)
+    view2.remove_edge_from_view(edge_id=eid)
+    assert not view2.has_edge(n1, n2)
+    assert graph_backend.has_edge(n1, n2)
+
+
+def test_remove_edge_from_view_traversals_still_work(graph_backend: BaseGraph) -> None:
+    """`_out_of_sync` stays False after view-only edge removal."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    graph_backend.add_edge(n0, n1, {})
+
+    view = graph_backend.filter().subgraph()
+    view.remove_edge_from_view(n0, n1)
+
+    assert view._out_of_sync is False
+    view.successors(n0)
+    view.predecessors(n1)
+
+
+def test_remove_edge_from_view_validation(graph_backend: BaseGraph) -> None:
+    """Bad inputs raise ValueError; sync=False raises RuntimeError."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    graph_backend.add_edge(n0, n1, {})
+
+    view = graph_backend.filter().subgraph()
+
+    with pytest.raises(ValueError, match=r"Provide either edge_id or both source_id and target_id\."):
+        view.remove_edge_from_view()
+
+    # Non-existent endpoints
+    with pytest.raises(ValueError, match=rf"Edge {n1}->{n0} does not exist in the graph\."):
+        view.remove_edge_from_view(n1, n0)
+
+    # Edge id not in view
+    with pytest.raises(ValueError, match=r"Edge 999999 does not exist in the view\."):
+        view.remove_edge_from_view(edge_id=999999)
+
+    view.sync = False
+    with pytest.raises(RuntimeError, match=r"remove_edge_from_view requires sync=True"):
+        view.remove_edge_from_view(n0, n1)
+
+
+def test_add_node_to_view_basic(graph_backend: BaseGraph) -> None:
+    """`add_node_to_view` re-surfaces a root node into the view without touching root."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 2, "x": 2.0})
+
+    view = graph_backend.filter().subgraph()
+    assert isinstance(view, GraphView)
+
+    # Drop n1 from the view, then add it back.
+    view.remove_node_from_view(n1)
+    assert n1 not in view.node_ids()
+
+    view.add_node_to_view(n1)
+
+    # Back in the view, root never changed.
+    assert n1 in view.node_ids()
+    assert view.has_node(n1)
+    assert graph_backend.has_node(n1)
+    # Attribute value survives the round-trip (important for the copy-path backends).
+    df = view.node_attrs()
+    assert df.filter(pl.col(DEFAULT_ATTR_KEYS.NODE_ID) == n1)["x"].item() == 1.0
+    _ = (n0, n2)
+
+
+def test_add_node_to_view_roundtrip_identity(graph_backend: BaseGraph) -> None:
+    """remove + add restores the view's node/edge sets exactly (all backends)."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    graph_backend.add_edge_attr_key("weight", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 2, "x": 2.0})
+    graph_backend.add_edge(n0, n1, {"weight": 0.2})
+    graph_backend.add_edge(n1, n2, {"weight": 0.8})
+
+    view = graph_backend.filter().subgraph()
+    nodes_before = set(view.node_ids())
+    edges_before = set(view._edge_map_to_root.values())
+
+    # Removing n1 also drops its two incident edges from the view.
+    view.remove_node_from_view(n1)
+    # Revive the node, then its incident edges.
+    view.add_node_to_view(n1)
+    view.add_edge_to_view(n0, n1)
+    view.add_edge_to_view(n1, n2)
+
+    assert set(view.node_ids()) == nodes_before
+    assert set(view._edge_map_to_root.values()) == edges_before
+    # Edge attributes survive the round-trip.
+    assert view.has_edge(n0, n1)
+    assert view.has_edge(n1, n2)
+    e_attrs = view.edge_attrs(attr_keys=["weight"])
+    weights = dict(
+        zip(
+            zip(e_attrs[DEFAULT_ATTR_KEYS.EDGE_SOURCE], e_attrs[DEFAULT_ATTR_KEYS.EDGE_TARGET], strict=False),
+            e_attrs["weight"],
+            strict=False,
+        )
+    )
+    assert weights[(n0, n1)] == 0.2
+    assert weights[(n1, n2)] == 0.8
+
+
+def test_add_node_to_view_signals(graph_backend: BaseGraph) -> None:
+    """Only the view's `node_added` fires; the root's signal does not."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+
+    view = graph_backend.filter().subgraph()
+    view.remove_node_from_view(n1)
+
+    # `node_added` is a Signal(list, list); slots iterate the batch exactly like
+    # the real consumers (GraphArrayView._on_node_added). A non-iterating slot would
+    # silently accept a buggy scalar emit — these don't.
+    view_calls: list[tuple[int, dict]] = []
+    root_calls: list[tuple[int, dict]] = []
+
+    def _record(sink: list, node_ids: list[int], new_attrs: list[dict]) -> None:
+        for nid, attrs in zip(node_ids, new_attrs, strict=True):
+            sink.append((nid, attrs))
+
+    view.node_added.connect(lambda node_ids, new_attrs: _record(view_calls, node_ids, new_attrs))
+    graph_backend.node_added.connect(lambda node_ids, new_attrs: _record(root_calls, node_ids, new_attrs))
+
+    view.add_node_to_view(n1)
+
+    assert len(root_calls) == 0
+    assert len(view_calls) == 1
+    assert view_calls[0][0] == n1
+    assert view_calls[0][1]["x"] == 1.0
+    _ = n0
+
+
+def test_add_node_to_view_validation(graph_backend: BaseGraph) -> None:
+    """Already-in-view / missing-in-root raise ValueError; sync=False raises RuntimeError."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+
+    view = graph_backend.filter().subgraph()
+
+    # n0 is already in the view
+    with pytest.raises(ValueError, match=r"already in the view"):
+        view.add_node_to_view(n0)
+
+    # node that does not exist in the root
+    with pytest.raises(ValueError, match=r"does not exist in the root graph"):
+        view.add_node_to_view(999999)
+
+    view.remove_node_from_view(n0)
+    view.sync = False
+    with pytest.raises(RuntimeError, match=r"add_node_to_view requires sync=True"):
+        view.add_node_to_view(n0)
+
+
+def test_view_only_helpers_emit_batched_signal(graph_backend: BaseGraph) -> None:
+    """Regression: view-only remove/add must emit the batched ``Signal(list, list)``.
+
+    ``remove_node_from_view``/``add_node_to_view`` previously emitted scalars
+    (``node_id``, ``attrs``) instead of single-element lists. Real consumers
+    (SpatialFilter, GraphArrayView) iterate the payload with ``zip(node_ids, attrs)``,
+    so a scalar emit raised ``EmitLoopError`` (``zip(int, dict)`` -> not iterable).
+    This slot reproduces that consumer pattern.
+    """
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+
+    view = graph_backend.filter().subgraph()
+
+    removed: list[tuple[int, dict]] = []
+    added: list[tuple[int, dict]] = []
+
+    def on_removed(node_ids: list[int], old_attrs: list[dict]) -> None:
+        for nid, attrs in zip(node_ids, old_attrs, strict=True):
+            removed.append((nid, attrs))
+
+    def on_added(node_ids: list[int], new_attrs: list[dict]) -> None:
+        for nid, attrs in zip(node_ids, new_attrs, strict=True):
+            added.append((nid, attrs))
+
+    view.node_removed.connect(on_removed)
+    view.node_added.connect(on_added)
+
+    # Must not raise EmitLoopError from a consumer iterating the batch.
+    view.remove_node_from_view(n1)
+    view.add_node_to_view(n1)
+
+    assert removed == [(n1, removed[0][1])]
+    assert removed[0][1]["x"] == 1.0
+    assert added == [(n1, added[0][1])]
+    assert added[0][1]["x"] == 1.0
+    _ = n0
+
+
+def test_add_nodes_via_view_shares_storage_with_root(graph_backend: BaseGraph) -> None:
+    """Regression: nodes added *through a view* must stay in sync with the root.
+
+    ``update_node_attrs``/``update_edge_attrs`` skip syncing the view's local store
+    for rx roots, on the assumption that root and view share attribute-dict storage.
+    The view add-path previously stored *copies*, so a root write was never reflected
+    in the view for nodes added through the view. This builds the funtracks pattern
+    (empty graph -> subgraph -> add via view) and asserts a root write is visible.
+    """
+    graph_backend.add_node_attr_key("area", default_value=0.0, dtype=pl.Float64)
+
+    view = graph_backend.filter().subgraph()
+    if not view._is_root_rx_graph:
+        # Only rx roots share attribute storage root<->view; for copy-on-subgraph
+        # backends (e.g. SQL) a direct-on-root write is intentionally not propagated.
+        pytest.skip("shared-storage invariant only applies to rustworkx-family roots")
+
+    (node_id,) = view.bulk_add_nodes(nodes=[{"t": 0, "area": 10.0}])
+
+    # Write on the root; the view (and its readers) must observe it.
+    graph_backend.update_node_attrs(attrs={"area": 99.0}, node_ids=[node_id])
+
+    assert view.nodes[node_id]["area"] == 99.0
+    # Reading via the dataframe API must agree with the per-node accessor.
+    view_area = view.node_attrs().filter(pl.col(DEFAULT_ATTR_KEYS.NODE_ID) == node_id)["area"].item()
+    assert view_area == 99.0
+
+
+def test_add_edge_to_view_basic(graph_backend: BaseGraph) -> None:
+    """`add_edge_to_view` re-surfaces a root edge into the view, leaving root untouched."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    graph_backend.add_edge_attr_key("weight", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    graph_backend.add_edge(n0, n1, {"weight": 0.5})
+
+    view = graph_backend.filter().subgraph()
+    view.remove_edge_from_view(n0, n1)
+    assert not view.has_edge(n0, n1)
+
+    view.add_edge_to_view(n0, n1)
+    assert view.has_edge(n0, n1)
+    assert graph_backend.has_edge(n0, n1)
+    e_attrs = view.edge_attrs(attr_keys=["weight"])
+    row = e_attrs.filter((pl.col(DEFAULT_ATTR_KEYS.EDGE_SOURCE) == n0) & (pl.col(DEFAULT_ATTR_KEYS.EDGE_TARGET) == n1))
+    assert row["weight"].item() == 0.5
+
+
+def test_add_edge_to_view_keeps_edge_id(graph_backend: BaseGraph) -> None:
+    """A revived edge's local row must carry the root edge id, so reads by id work."""
+    graph_backend.add_edge_attr_key("weight", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0})
+    n1 = graph_backend.add_node({"t": 1})
+    root_edge_id = graph_backend.add_edge(n0, n1, {"weight": 1.5})
+
+    view = graph_backend.filter().subgraph()
+    view.remove_edge_from_view(n0, n1)
+    view.add_edge_to_view(n0, n1)
+
+    assert view.edge_id(n0, n1) == root_edge_id
+    assert view.edge_attrs(attr_keys=["weight"])[DEFAULT_ATTR_KEYS.EDGE_ID].to_list() == [root_edge_id]
+    assert view.edges[root_edge_id]["weight"] == 1.5
+
+
+def test_add_edge_to_view_validation(graph_backend: BaseGraph) -> None:
+    """Bad inputs raise ValueError; sync=False raises RuntimeError."""
+    graph_backend.add_node_attr_key("x", pl.Float64)
+    graph_backend.add_edge_attr_key("weight", pl.Float64)
+
+    n0 = graph_backend.add_node({"t": 0, "x": 0.0})
+    n1 = graph_backend.add_node({"t": 1, "x": 1.0})
+    n2 = graph_backend.add_node({"t": 2, "x": 2.0})
+    graph_backend.add_edge(n0, n1, {"weight": 0.5})
+
+    view = graph_backend.filter().subgraph()
+
+    # Endpoint not in the view
+    view.remove_node_from_view(n2)
+    with pytest.raises(ValueError, match=r"Endpoint .* is not in the view"):
+        view.add_edge_to_view(n0, n2)
+    view.add_node_to_view(n2)
+
+    # Root edge does not exist
+    with pytest.raises(ValueError, match=r"does not exist"):
+        view.add_edge_to_view(n1, n2)
+
+    # Edge already in the view
+    with pytest.raises(ValueError, match=r"already in the view"):
+        view.add_edge_to_view(n0, n1)
+
+    # sync=False
+    view.remove_edge_from_view(n0, n1)
+    view.sync = False
+    with pytest.raises(RuntimeError, match=r"add_edge_to_view requires sync=True"):
+        view.add_edge_to_view(n0, n1)
+
+
 @parametrize_subgraph_tests
 def test_has_node(graph_backend: BaseGraph, use_subgraph: bool) -> None:
     """Test has_node functionality on both original graphs and subgraphs."""
@@ -1266,6 +1821,63 @@ def test_picking_graph_mappings(graph_backend: BaseGraph, use_subgraph: bool) ->
 
 
 @parametrize_subgraph_tests
+def test_dividing_nodes(graph_backend: BaseGraph, use_subgraph: bool) -> None:
+    """Test dividing_nodes on both original graphs and subgraphs."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph)
+
+    if graph_with_data._is_subgraph:  # type: ignore[attr-defined]
+        # subgraph contains node1, node2, node4 with edge node1 -> node2 -> node4
+        # node1 has out-degree 1 within the subgraph, so no dividing nodes yet
+        assert set(graph_with_data.dividing_nodes()) == set()
+
+        # Add a sibling for node2 branching off node1, making node1 a dividing node
+        node1 = graph_with_data._test_nodes[2]  # type: ignore[attr-defined]
+        new_node = graph_with_data.add_node({"t": 2, "x": 9.0, "y": 9.0, "label": "D"})
+        graph_with_data.add_edge(node1, new_node, attrs={"weight": 0.5, "new_attribute": 1.0})
+
+        assert set(graph_with_data.dividing_nodes()) == {node1}
+    else:
+        # full graph: node1 divides into node2 and node3
+        node1 = graph_with_data._test_nodes[1]  # type: ignore[attr-defined]
+        assert set(graph_with_data.dividing_nodes()) == {node1}
+
+
+@parametrize_subgraph_tests
+def test_filter_num_nodes_and_edges(graph_backend: BaseGraph, use_subgraph: bool) -> None:
+    """Test filter.num_nodes() and filter.num_edges() across backends and subgraphs."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph)
+
+    # filter returning all nodes/edges
+    all_filter = graph_with_data.filter()
+    assert all_filter.num_nodes() == len(graph_with_data._test_nodes)  # type: ignore
+    assert all_filter.num_edges() == len(graph_with_data._test_edges)  # type: ignore
+
+    # filter by node attribute
+    node_attrs = graph_with_data.node_attrs()
+    for t_val in node_attrs["t"].unique().to_list():
+        f = graph_with_data.filter(NodeAttr("t") == t_val)
+        expected_nodes = node_attrs.filter(pl.col("t") == t_val)[DEFAULT_ATTR_KEYS.NODE_ID].to_list()
+        assert f.num_nodes() == len(expected_nodes)
+
+    # filter by node IDs
+    node_ids = graph_with_data._test_nodes[:2]  # type: ignore
+    id_filter = graph_with_data.filter(node_ids=node_ids)
+    assert id_filter.num_nodes() == 2
+
+    # filter by edge attribute
+    edge_attrs = graph_with_data.edge_attrs()
+    for w_val in edge_attrs["weight"].unique().to_list():
+        f = graph_with_data.filter(EdgeAttr("weight") == w_val)
+        expected_edges = edge_attrs.filter(pl.col("weight") == w_val)[DEFAULT_ATTR_KEYS.EDGE_ID].to_list()
+        assert f.num_edges() == len(expected_edges)
+
+    # filter returning nothing
+    empty_filter = graph_with_data.filter(NodeAttr("t") == 9999)
+    assert empty_filter.num_nodes() == 0
+    assert empty_filter.num_edges() == 0
+
+
+@parametrize_subgraph_tests
 def test_edge_list(graph_backend: BaseGraph, use_subgraph: bool) -> None:
     """Test edge_list functionality on both original graphs and subgraphs."""
     graph_with_data = create_test_graph(graph_backend, use_subgraph)
@@ -1280,3 +1892,411 @@ def test_edge_list(graph_backend: BaseGraph, use_subgraph: bool) -> None:
         )
     )
     assert edge_list == expected_edge_list
+
+
+def test_subgraph_bulk_remove_nodes(graph_backend: BaseGraph) -> None:
+    """bulk_remove_nodes on a view drops from view+root and cleans edge mappings."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+    original_nodes = graph_with_data._test_nodes  # type: ignore
+
+    view = graph_with_data.filter().subgraph()
+
+    to_remove = [original_nodes[1], original_nodes[2]]
+    view.bulk_remove_nodes(to_remove)
+
+    remaining = set(original_nodes) - set(to_remove)
+    assert set(view.node_ids()) == remaining
+    assert set(graph_with_data.node_ids()) == remaining
+    # Edges incident to removed nodes must be gone from both layers.
+    view_edges = set(view.edge_ids())
+    root_edges = set(graph_with_data.edge_ids())
+    assert view_edges == root_edges
+
+
+def test_subgraph_bulk_remove_edges(graph_backend: BaseGraph) -> None:
+    """bulk_remove_edges on a view drops from view+root, nodes untouched."""
+    graph_with_data = create_test_graph(graph_backend, use_subgraph=False)
+    original_nodes = graph_with_data._test_nodes  # type: ignore
+    original_edges = graph_with_data._test_edges  # type: ignore
+
+    view = graph_with_data.filter().subgraph()
+
+    to_remove = original_edges[:2]
+    view.bulk_remove_edges(to_remove)
+
+    remaining = set(original_edges) - set(to_remove)
+    assert set(view.edge_ids()) == remaining
+    assert set(graph_with_data.edge_ids()) == remaining
+    assert set(view.node_ids()) == set(original_nodes)
+    assert set(graph_with_data.node_ids()) == set(original_nodes)
+
+
+def _build_chain_graph(graph: SQLGraph, n_nodes: int) -> list[int]:
+    node_ids: list[int] = []
+    for t in range(n_nodes):
+        node_ids.append(graph.add_node({DEFAULT_ATTR_KEYS.T: t}))
+    for src, tgt in itertools.pairwise(node_ids):
+        graph.add_edge(src, tgt, {})
+    graph.add_overlap(node_ids[0], node_ids[1])
+    graph.add_overlap(node_ids[2], node_ids[3])
+    return node_ids
+
+
+def _scratch_table_count(graph: SQLGraph) -> int:
+    """Count leftover ``_tracksdata_ids_*`` scratch tables in a SQLite graph.
+
+    Scratch tables are regular (engine-wide) tables and live in
+    ``sqlite_master``; we also probe ``sqlite_temp_master`` to flag any
+    regression that creates a leaky ``TEMPORARY`` scratch table on a
+    pooled connection.
+    """
+    import sqlalchemy as sa
+
+    total = 0
+    with graph._engine.connect() as conn:
+        for view in ("sqlite_master", "sqlite_temp_master"):
+            total += conn.execute(
+                sa.text(f"SELECT COUNT(*) FROM {view} WHERE type='table' AND name LIKE '_tracksdata_ids_%'")
+            ).scalar()
+    return total
+
+
+def test_sql_graph_filter_large_node_ids(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filtering with more ids than SQLite's variable limit must not raise.
+
+    Reproduces the ``OperationalError: too many SQL variables`` failure by
+    forcing the scratch-table code path via a tiny chunk size. ``overlaps``
+    and ``_get_degree`` use the same chunk size to drive their chunked
+    ``IN(...)`` reads, so they exercise that path without allocating scratch
+    tables.
+    """
+    graph = SQLGraph("sqlite", str(tmp_path / "scratch.db"))
+    n_nodes = 40
+    node_ids = _build_chain_graph(graph, n_nodes)
+
+    # Force the chunked / scratch-table paths on every call site by shrinking
+    # the chunk size well below ``n_nodes``.
+    monkeypatch.setattr(SQLGraph, "_sql_chunk_size", lambda self: 4)
+
+    # ``overlaps`` and the degree helpers chunk via ``_chunked_sa_read`` and
+    # do not allocate scratch tables, so the count stays at zero.
+    assert _scratch_table_count(graph) == 0
+    in_deg = graph.in_degree(node_ids)
+    assert _scratch_table_count(graph) == 0
+    out_deg = graph.out_degree(node_ids)
+    assert _scratch_table_count(graph) == 0
+    overlaps = graph.overlaps(node_ids)
+    assert _scratch_table_count(graph) == 0
+
+    assert sum(in_deg) == n_nodes - 1
+    assert sum(out_deg) == n_nodes - 1
+    assert sorted(map(tuple, overlaps)) == sorted([(node_ids[0], node_ids[1]), (node_ids[2], node_ids[3])])
+
+    filtered = graph.filter(node_ids=node_ids)
+    # The filter wraps node_ids in an _SQLIDSet, which must materialize to a
+    # scratch table given the forced tiny chunk size.
+    assert filtered._uses_scratch_table()
+    subgraph = filtered.subgraph()
+    assert subgraph.num_nodes() == n_nodes
+    assert subgraph.num_edges() == n_nodes - 1
+
+    # Once the filter is collected, the scratch table is dropped.
+    del filtered, subgraph
+    gc.collect()
+    assert _scratch_table_count(graph) == 0
+
+
+def test_sql_from_other_excludes_scratch_tables(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``from_other`` over the SQLite attach-dump path must not leak scratch
+    tables into the destination DB.
+
+    The filtered fast path creates a ``_tracksdata_ids_<uuid>`` selection
+    table on the source engine; if the DDL replay does not exclude it the
+    destination ends up with the internal helper persisted alongside
+    ``Node`` / ``Edge`` / ``Overlap`` / ``Metadata``.
+    """
+    import sqlalchemy as sa
+
+    monkeypatch.setattr(SQLGraph, "_sql_chunk_size", lambda self: 1)
+
+    src = SQLGraph("sqlite", str(tmp_path / "src.db"))
+    node_ids = _build_chain_graph(src, n_nodes=6)
+
+    subgraph = src.filter(node_ids=node_ids).subgraph()
+    dst_db = tmp_path / "dst.db"
+    dst = SQLGraph.from_other(subgraph, drivername="sqlite", database=str(dst_db))
+
+    try:
+        with dst._engine.connect() as conn:
+            names = {
+                row[0] for row in conn.execute(sa.text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }
+    finally:
+        dst._engine.dispose()
+
+    assert names == {"Node", "Edge", "Overlap", "Metadata"}, names
+
+
+def test_sql_graph_filter_borderline_node_ids(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scratch cutoff must account for how many times ids appear per statement.
+
+    With ``_sql_chunk_size() == 12`` and ``SQLFilter`` using ``occurrences=3``,
+    a list of 5 ids would compile to ~15 bound variables — above the limit —
+    even though ``len(node_ids) <= chunk_size``. The helper must still switch
+    to the scratch-table path in that band.
+    """
+    graph = SQLGraph("sqlite", str(tmp_path / "scratch.db"))
+    n_nodes = 5
+    node_ids = _build_chain_graph(graph, n_nodes)
+
+    monkeypatch.setattr(SQLGraph, "_sql_chunk_size", lambda self: 12)
+
+    filtered = graph.filter(node_ids=node_ids)
+    # 5 ids fits under chunk_size=12 inline, but with occurrences=3 the
+    # effective cutoff is 12 // 3 == 4, so scratch must kick in.
+    assert filtered._uses_scratch_table()
+    subgraph = filtered.subgraph()
+    assert subgraph.num_nodes() == n_nodes
+    assert subgraph.num_edges() == n_nodes - 1
+
+    del filtered, subgraph
+    gc.collect()
+    assert _scratch_table_count(graph) == 0
+
+
+def _root_with_two_connected_nodes(graph_backend: BaseGraph) -> BaseGraph:
+    """A root graph with two nodes, one edge, and two attribute keys on each."""
+    graph_backend.add_node_attr_key("area", default_value=0.0, dtype=pl.Float64)
+    graph_backend.add_node_attr_key("bar", default_value=0.0, dtype=pl.Float64)
+    graph_backend.add_edge_attr_key("weight", default_value=0.0, dtype=pl.Float64)
+    graph_backend.add_edge_attr_key("cost", default_value=0.0, dtype=pl.Float64)
+    source = graph_backend.add_node({"t": 0, "area": 1.0, "bar": 1.0})
+    target = graph_backend.add_node({"t": 1, "area": 2.0, "bar": 2.0})
+    graph_backend.add_edge(source, target, {"weight": 1.0, "cost": 1.0})
+    return graph_backend
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_update_root_node_key_outside_view_attr_keys(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """A view tracking a subset of keys tolerates root updates to the keys it excluded.
+
+    A view built with an explicit `node_attr_keys` has no local column for the
+    keys it left out, so the update must not be propagated into it, in either
+    mode. Whether a root update to a key the view *does* track reaches it is
+    where the two modes would normally differ -- except an rx-family root's
+    view shares its attribute dicts by reference regardless of mode, so it
+    stays current either way; only a non-rx (SQL) root actually needs `LIVE`'s
+    push for this.
+    """
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(node_attr_keys=["area"], mode=mode)
+
+    assert "bar" not in view.node_attr_keys()
+
+    root.update_node_attrs(attrs={"bar": [9.0]}, node_ids=[root.node_ids()[0]])
+
+    assert root.node_attrs(attr_keys=["bar"])["bar"].to_list() == [9.0, 2.0]
+    assert "bar" not in view.node_attr_keys()
+
+    root.update_node_attrs(attrs={"area": [7.0]}, node_ids=[root.node_ids()[0]])
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    if stays_current:
+        assert view.node_attrs(attr_keys=["area"])["area"].to_list() == [7.0, 2.0]
+    else:
+        assert view.node_attrs(attr_keys=["area"])["area"].to_list() == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_update_root_edge_key_outside_view_attr_keys(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """The edge counterpart of `test_update_root_node_key_outside_view_attr_keys`."""
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(edge_attr_keys=["weight"], mode=mode)
+
+    assert "cost" not in view.edge_attr_keys()
+
+    root.update_edge_attrs(attrs={"cost": [9.0]}, edge_ids=[root.edge_ids()[0]])
+
+    assert root.edge_attrs(attr_keys=["cost"])["cost"].to_list() == [9.0]
+    assert "cost" not in view.edge_attr_keys()
+
+    root.update_edge_attrs(attrs={"weight": [7.0]}, edge_ids=[root.edge_ids()[0]])
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    if stays_current:
+        assert view.edge_attrs(attr_keys=["weight"])["weight"].to_list() == [7.0]
+    else:
+        assert view.edge_attrs(attr_keys=["weight"])["weight"].to_list() == [1.0]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_add_node_attr_key_on_root_reaches_live_view(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """A key registered on the root must reach the views already derived from it.
+
+    A rustworkx-rooted view reports the root's keys and shares its attribute
+    dicts, so it picks the key up for free regardless of mode. A SQLGraph-rooted
+    view holds its own copy of both and needs `LIVE`'s push to be told.
+    """
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(mode=mode)
+
+    root.add_node_attr_key("foo", default_value=-1, dtype=pl.Int64)
+
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    assert "foo" in root.node_attr_keys()
+    assert ("foo" in view.node_attr_keys()) == stays_current
+
+    if stays_current:
+        assert view.node_attrs(attr_keys=["foo"])["foo"].to_list() == [-1, -1]
+        # the view's local store accepts writes to the new key, on either side
+        root.update_node_attrs(attrs={"foo": [7]}, node_ids=[root.node_ids()[0]])
+        assert view.node_attrs(attr_keys=["foo"])["foo"].to_list() == [7, -1]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_add_edge_attr_key_on_root_reaches_live_view(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """The edge counterpart of `test_add_node_attr_key_on_root_reaches_live_view`."""
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(mode=mode)
+
+    root.add_edge_attr_key("w", default_value=-1.0, dtype=pl.Float64)
+
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    assert "w" in root.edge_attr_keys()
+    assert ("w" in view.edge_attr_keys()) == stays_current
+
+    if stays_current:
+        assert view.edge_attrs(attr_keys=["w"])["w"].to_list() == [-1.0]
+        root.update_edge_attrs(attrs={"w": [1.5]}, edge_ids=[root.edge_ids()[0]])
+        assert view.edge_attrs(attr_keys=["w"])["w"].to_list() == [1.5]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_add_attr_key_on_view_reaches_sibling_view(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """Registering through one view must reach the other views of the same root.
+
+    Unlike the root-initiated cases above, `view_a`'s write always reaches
+    root (every mode writes through) -- what varies is whether the *sibling*
+    `view_b` finds out, which needs either shared attribute dicts (an
+    rx-family root) or `view_b` being registered for `LIVE`'s push.
+    """
+    root = _root_with_two_connected_nodes(graph_backend)
+    view_a = root.filter().subgraph(mode=mode)
+    view_b = root.filter().subgraph(mode=mode)
+
+    view_a.add_node_attr_key("foo", default_value=-1, dtype=pl.Int64)
+    view_a.add_edge_attr_key("w", default_value=-1.0, dtype=pl.Float64)
+
+    assert "foo" in root.node_attr_keys()
+    assert "w" in root.edge_attr_keys()
+
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    assert ("foo" in view_b.node_attr_keys()) == stays_current
+    assert ("w" in view_b.edge_attr_keys()) == stays_current
+
+    if stays_current:
+        assert view_b.node_attrs(attr_keys=["foo"])["foo"].to_list() == [-1, -1]
+        assert view_b.edge_attrs(attr_keys=["w"])["w"].to_list() == [-1.0]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_remove_node_attr_key_on_root_reaches_live_view(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """The remove counterpart of `test_add_node_attr_key_on_root_reaches_live_view`.
+
+    Dropping a key on the root must drop it from the views already derived from
+    it. An rx-family view leaves `node_attr_keys` unset (`subgraph()` only pins
+    it when the caller asks), so its schema always delegates straight to root
+    regardless of mode -- but `SQLGraph.subgraph()` always materializes an
+    explicit key list up front even when the caller didn't ask for one, so a
+    SQL-rooted view is *always* effectively pinned and needs `LIVE`'s push for
+    root's removal to reach its schema at all.
+    """
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(mode=mode)
+
+    root.remove_node_attr_key("bar")
+
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    assert "bar" not in root.node_attr_keys()
+    assert ("bar" not in view.node_attr_keys()) == stays_current
+
+    if stays_current:
+        with pytest.raises(KeyError):
+            view.node_attrs(attr_keys=["bar"])
+        assert view.node_attrs(attr_keys=["area"])["area"].to_list() == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_remove_edge_attr_key_on_root_reaches_live_view(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """The edge counterpart of `test_remove_node_attr_key_on_root_reaches_live_view`."""
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(mode=mode)
+
+    root.remove_edge_attr_key("cost")
+
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    assert "cost" not in root.edge_attr_keys()
+    assert ("cost" not in view.edge_attr_keys()) == stays_current
+
+    if stays_current:
+        with pytest.raises(KeyError):
+            view.edge_attrs(attr_keys=["cost"])
+        assert view.edge_attrs(attr_keys=["weight"])["weight"].to_list() == [1.0]
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_remove_node_attr_key_on_root_updates_pinned_view_keys(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """A view pinning an explicit key list must not keep reporting a removed key.
+
+    The pinned list is the view's own local state (not shared with root even
+    for an rx-family root), so a root removal only reaches it in `LIVE` mode --
+    otherwise the view advertises a column that no longer exists anywhere.
+    """
+    root = _root_with_two_connected_nodes(graph_backend)
+    view = root.filter().subgraph(node_attr_keys=["area", "bar"], edge_attr_keys=["weight", "cost"], mode=mode)
+
+    assert "bar" in view.node_attr_keys()
+    assert "cost" in view.edge_attr_keys()
+
+    root.remove_node_attr_key("bar")
+    root.remove_edge_attr_key("cost")
+
+    if mode == ViewMode.LIVE:
+        assert "bar" not in view.node_attr_keys()
+        assert "cost" not in view.edge_attr_keys()
+        # node_attrs() with no attr_keys uses the pinned list, so a stale entry
+        # there surfaces as a failure to materialize the view at all
+        assert "bar" not in view.node_attrs().columns
+        assert "cost" not in view.edge_attrs().columns
+    else:
+        # WRITE_THROUGH is not registered for root's push, so the pinned list
+        # (this view's own local state) still advertises the removed key
+        assert "bar" in view.node_attr_keys()
+        assert "cost" in view.edge_attr_keys()
+
+
+@pytest.mark.parametrize("mode", [ViewMode.WRITE_THROUGH, ViewMode.LIVE])
+def test_remove_attr_key_on_view_reaches_sibling_view(graph_backend: BaseGraph, mode: ViewMode) -> None:
+    """The remove counterpart of `test_add_attr_key_on_view_reaches_sibling_view`.
+
+    Removing through one view always propagates up to the root (every mode
+    writes through); whether the *sibling* view finds out follows the same
+    rx-delegates/SQL-always-pinned rule as
+    `test_remove_node_attr_key_on_root_reaches_live_view`.
+    """
+    root = _root_with_two_connected_nodes(graph_backend)
+    view_a = root.filter().subgraph(mode=mode)
+    view_b = root.filter().subgraph(mode=mode)
+
+    view_a.remove_node_attr_key("bar")
+    view_a.remove_edge_attr_key("cost")
+
+    stays_current = mode == ViewMode.LIVE or isinstance(root, RustWorkXGraph)
+    assert "bar" not in root.node_attr_keys()
+    assert "cost" not in root.edge_attr_keys()
+    assert ("bar" not in view_b.node_attr_keys()) == stays_current
+    assert ("cost" not in view_b.edge_attr_keys()) == stays_current
+
+    if stays_current:
+        with pytest.raises(KeyError):
+            view_b.node_attrs(attr_keys=["bar"])
+        with pytest.raises(KeyError):
+            view_b.edge_attrs(attr_keys=["cost"])

@@ -4,6 +4,7 @@ import operator
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from weakref import WeakSet
 
 import geff
 import numpy as np
@@ -11,11 +12,11 @@ import polars as pl
 import rustworkx as rx
 from geff.core_io import construct_var_len_props, write_arrays
 from geff_spec import Axis, GeffMetadata, PropMetadata
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, DTypeLike
 from psygnal import Signal
 from zarr.storage import StoreLike
 
-from tracksdata.attrs import AttrComparison, NodeAttr
+from tracksdata.attrs import Filter, NodeAttr
 from tracksdata.constants import DEFAULT_ATTR_KEYS
 from tracksdata.utils._cache import cache_method
 from tracksdata.utils._dtypes import (
@@ -27,6 +28,7 @@ from tracksdata.utils._logging import LOG
 from tracksdata.utils._multiprocessing import multiprocessing_apply
 
 if TYPE_CHECKING:
+    import motile
     from traccuracy import TrackingGraph
 
     from tracksdata.graph.filters._base_filter import BaseFilter
@@ -42,22 +44,212 @@ else:
 T = TypeVar("T", bound="BaseGraph")
 
 
+class MetadataView(dict[str, Any]):
+    """Dictionary-like metadata view that syncs mutations back to the graph."""
+
+    _MISSING = object()
+
+    def __init__(
+        self,
+        graph: "BaseGraph",
+        data: dict[str, Any],
+        *,
+        is_public: bool = True,
+    ) -> None:
+        super().__init__(data)
+        self._graph = graph
+        self._is_public = is_public
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._graph._set_metadata_with_validation(is_public=self._is_public, **{key: value})
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        self._graph._remove_metadata_with_validation(key, is_public=self._is_public)
+        super().__delitem__(key)
+
+    def pop(self, key: str, default: Any = _MISSING) -> Any:
+        self._graph._validate_metadata_key(key, is_public=self._is_public)
+
+        if key not in self:
+            if default is self._MISSING:
+                raise KeyError(key)
+            return default
+
+        value = super().__getitem__(key)
+        self._graph._remove_metadata_with_validation(key, is_public=self._is_public)
+        super().pop(key, None)
+        return value
+
+    def popitem(self) -> tuple[str, Any]:
+        key, value = super().popitem()
+        self._graph._remove_metadata_with_validation(key, is_public=self._is_public)
+        return key, value
+
+    def clear(self) -> None:
+        keys = list(self.keys())
+        for key in keys:
+            self._graph._remove_metadata_with_validation(key, is_public=self._is_public)
+        super().clear()
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key in self:
+            return super().__getitem__(key)
+        self._graph._set_metadata_with_validation(is_public=self._is_public, **{key: default})
+        super().__setitem__(key, default)
+        return default
+
+    def update(self, *args, **kwargs) -> None:
+        updates = dict(*args, **kwargs)
+        if updates:
+            self._graph._set_metadata_with_validation(is_public=self._is_public, **updates)
+        super().update(updates)
+
+
 class BaseGraph(abc.ABC):
     """
     Base class for a graph backend.
     """
 
-    node_added = Signal(int)
-    node_removed = Signal(int)
+    _PRIVATE_METADATA_PREFIX = "__private_"
+    node_added = Signal(list, list)
+    node_removed = Signal(list, list)
+    node_updated = Signal(list, list, list, set)
 
     def __init__(self) -> None:
         self._cache = {}
+        # Views derived from this graph, to be kept up to date when it changes.
+        # Views add themselves on construction (see GraphView.__init__).
+        #
+        # Held weakly: once nothing else references a view, nobody can observe
+        # whether it is current, so maintaining it would be pure overhead.
+        # Dropping the last reference to a view is all that is needed to stop
+        # maintaining it.
+        self._views: WeakSet[BaseGraph] = WeakSet()
 
     def supports_custom_indices(self) -> bool:
         """
         Whether the graph backend supports custom indices.
         """
         return False
+
+    def __getstate__(self) -> dict[str, Any]:
+        """
+        Drop the view registry when serializing.
+
+        Views are runtime relationships between live objects, not data, so an
+        unpickled graph starts with none. A ``WeakSet`` is also not picklable,
+        as it holds an internal callback closure.
+        """
+        state = self.__dict__.copy()
+        state.pop("_views", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        # Excluded by __getstate__, so restore it empty: an unpickled graph has
+        # no live views.
+        self._views = WeakSet()
+
+    def _views_need_node_attrs(self) -> tuple[bool, bool]:
+        """
+        Whether any registered view needs before/after snapshots of a node update.
+
+        Building those snapshots is the dominant cost of updating a graph that has
+        views, so it must not be paid for views that cannot use them: a view that
+        shares this graph's attribute dicts (a rustworkx root) and has no listener
+        needs nothing at all.
+
+        Returns
+        -------
+        tuple[bool, bool]
+            ``(needs_old, needs_new)``. Old values are only ever used to emit a
+            view's ``node_updated``; new values are additionally needed by a view
+            that keeps its own copy of the attributes and has to be written through.
+        """
+        needs_old = needs_new = False
+        for view in self._views:
+            view_old, view_new = view._needs_node_attrs()
+            needs_old |= view_old
+            needs_new |= view_new
+            if needs_old and needs_new:
+                break
+        return needs_old, needs_new
+
+    def _maintain_views_node_attrs(
+        self,
+        node_ids: Sequence[int],
+        old_attrs_by_id: dict[int, dict[str, Any]] | None,
+        new_attrs_by_id: dict[int, dict[str, Any]] | None,
+        changed_keys: set[str],
+    ) -> None:
+        """
+        Bring every registered view up to date after a node attribute update.
+
+        Called by concrete ``update_node_attrs`` implementations after the root
+        graph has been updated and its own signal emitted. Each view absorbs
+        the change for the nodes it contains and then emits its own signals.
+
+        This is deliberately *not* routed through the signal system: keeping a
+        view consistent with its root is an invariant, so it must happen whether
+        or not anything is listening to the view.
+
+        `node_ids` and the attribute dicts are keyed by this graph's own node
+        ids, which is what views map from.
+        """
+        for view in self._views:
+            view._update_local_node_attrs(
+                node_ids=node_ids,
+                old_attrs_by_id=old_attrs_by_id,
+                new_attrs_by_id=new_attrs_by_id,
+                changed_keys=changed_keys,
+            )
+
+    def _maintain_views_edge_attrs(
+        self,
+        edge_ids: Sequence[int],
+        attrs: dict[str, Any],
+    ) -> None:
+        """
+        Bring every registered view up to date after an edge attribute update.
+
+        The edge counterpart of `_maintain_views_node_attrs`. There is no
+        ``edge_updated`` signal, so this only propagates data — no notification
+        step and no before/after snapshots.
+
+        `edge_ids` are this graph's own edge ids, which is what views map from.
+        """
+        for view in self._views:
+            view._update_local_edge_attrs(edge_ids=edge_ids, attrs=attrs)
+
+    def _maintain_views_attr_key(self, schema: AttrSchema, mode: Literal["node", "edge"]) -> None:
+        """
+        Bring every registered view up to date after a new attribute key is added.
+
+        The schema counterpart of `_maintain_views_node_attrs`, called by concrete
+        ``add_node_attr_key`` / ``add_edge_attr_key`` implementations once the key
+        exists on this graph. A view that keeps its own copy of the attributes has
+        to grow the column too, otherwise it keeps reporting a stale schema and
+        rejects later writes to the new key.
+
+        Adding a key is a schema operation, so this runs once per key rather than
+        once per row of a write.
+        """
+        for view in self._views:
+            view._add_local_attr_key(schema, mode)
+
+    def _maintain_views_remove_attr_key(self, key: str, mode: Literal["node", "edge"]) -> None:
+        """
+        Bring every registered view up to date after an attribute key is removed.
+
+        The mirror of `_maintain_views_attr_key`, called by concrete
+        ``remove_node_attr_key`` / ``remove_edge_attr_key`` implementations once
+        the key is gone from this graph. Without it a view that keeps its own copy
+        of the schema or of the attributes keeps advertising a column that no
+        longer exists on the root.
+        """
+        for view in self._views:
+            view._remove_local_attr_key(key, mode)
 
     @staticmethod
     def _validate_attributes(
@@ -98,7 +290,53 @@ class BaseGraph(abc.ABC):
                 f"{mode} attribute keys not found in attrs: '{missing_keys}'\nRequested keys: '{reference_keys}'"
             )
 
-    @abc.abstractmethod
+    def _validate_attr_keys(
+        self,
+        attr_keys: Sequence[str] | str | None,
+        mode: Literal["node", "edge"],
+    ) -> None:
+        """
+        Validate that attribute keys being *read* exist on this graph.
+
+        Read-path counterpart of `_validate_attributes`. Raises `KeyError`, not `ValueError`,
+        because asking for a key that isn't there is a lookup miss (mirroring `dict[missing]`),
+        whereas `_validate_attributes` guards a *write* against a declared schema, which is a
+        bad-argument situation.
+
+        Without a central guard each backend leaks whatever its storage layer raises for an
+        unknown column -- `AttributeError` from SQLAlchemy's `getattr`, `KeyError` from a dict
+        lookup, or polars' `ColumnNotFoundError` (which is not a `KeyError` subclass) -- so the
+        same call raised three different types depending on the backend.
+
+        Parameters
+        ----------
+        attr_keys : Sequence[str] | str | None
+            The attribute keys to validate. `None` means "all keys" and is always valid.
+        mode : Literal["node", "edge"]
+            Whether to validate against node or edge attribute keys.
+
+        Raises
+        ------
+        KeyError
+            If any key is not a declared attribute key of this graph.
+        """
+        if attr_keys is None:
+            return
+
+        if isinstance(attr_keys, str):
+            attr_keys = [attr_keys]
+
+        # ``return_ids=True``: the id columns (node_id / edge_id / source_id / target_id) are
+        # legitimately requestable even though they are not user-declared attributes.
+        valid_keys = self.node_attr_keys(return_ids=True) if mode == "node" else self.edge_attr_keys(return_ids=True)
+
+        valid = set(valid_keys)
+        missing = sorted(set(attr_keys) - valid)  # sorted for consistent erorr message
+        if missing:
+            raise KeyError(
+                f"{mode} attribute key(s) {missing} not found. Available {mode} attribute keys: {sorted(valid)}"
+            )
+
     def add_node(
         self,
         attrs: dict[str, Any],
@@ -107,6 +345,10 @@ class BaseGraph(abc.ABC):
     ) -> int:
         """
         Add a node to the graph at time t.
+
+        Validates the attributes (when ``validate_keys`` is set) and then delegates
+        to :meth:`bulk_add_nodes`; backends implement the bulk form and inherit this
+        single-node wrapper.
 
         Parameters
         ----------
@@ -130,7 +372,15 @@ class BaseGraph(abc.ABC):
         int
             The ID of the added node.
         """
+        if validate_keys:
+            self._validate_attributes(attrs, self.node_attr_keys(), "node")
+            if "t" not in attrs:
+                raise ValueError(f"Node attributes must have a 't' key. Got {attrs.keys()}")
 
+        indices = None if index is None else [index]
+        return self.bulk_add_nodes([attrs], indices=indices)[0]
+
+    @abc.abstractmethod
     def bulk_add_nodes(
         self,
         nodes: list[dict[str, Any]],
@@ -138,6 +388,10 @@ class BaseGraph(abc.ABC):
     ) -> list[int]:
         """
         Faster method to add multiple nodes to the graph with less overhead and fewer checks.
+
+        Validation is intentionally skipped here; use :meth:`add_node` for the
+        validated single-node path. Implementations must accept an empty ``nodes``
+        list as a no-op.
 
         Parameters
         ----------
@@ -155,30 +409,20 @@ class BaseGraph(abc.ABC):
         list[int]
             The IDs of the added nodes.
         """
-        if len(nodes) == 0:
-            return []
-
-        self._validate_indices_length(nodes, indices)
-
-        # this method benefits the SQLGraph backend
-        if indices is None:
-            return [self.add_node(node, validate_keys=False) for node in nodes]
-        else:
-            return [
-                self.add_node(node, validate_keys=False, index=idx) for node, idx in zip(nodes, indices, strict=True)
-            ]
 
     def _validate_indices_length(self, nodes: list[dict[str, Any]], indices: list[int] | None) -> None:
         if indices is not None and len(indices) != len(nodes):
             raise ValueError(f"Length of indices ({len(indices)}) must match length of nodes ({len(nodes)})")
 
-    @abc.abstractmethod
     def remove_node(self, node_id: int) -> None:
         """
         Remove a node from the graph.
 
         This method removes the specified node and all edges connected to it
         (both incoming and outgoing edges).
+
+        Delegates to :meth:`bulk_remove_nodes`; backends implement the bulk form
+        and inherit this single-node wrapper.
 
         Parameters
         ----------
@@ -190,8 +434,29 @@ class BaseGraph(abc.ABC):
         ValueError
             If the node_id does not exist in the graph.
         """
+        self.bulk_remove_nodes([node_id])
 
     @abc.abstractmethod
+    def bulk_remove_nodes(self, node_ids: Sequence[int]) -> None:
+        """
+        Remove multiple nodes from the graph, along with their incident edges.
+
+        Existence must be validated up-front so the call either removes every
+        node in `node_ids` or raises without modifying the graph. Implementations
+        must accept an empty `node_ids` as a no-op and normalise array-like inputs
+        (e.g. numpy arrays) to a list.
+
+        Parameters
+        ----------
+        node_ids : Sequence[int]
+            The IDs of the nodes to remove.
+
+        Raises
+        ------
+        ValueError
+            If any node_id does not exist in the graph.
+        """
+
     def add_edge(
         self,
         source_id: int,
@@ -201,6 +466,10 @@ class BaseGraph(abc.ABC):
     ) -> int:
         """
         Add an edge to the graph.
+
+        Validates the attributes (when ``validate_keys`` is set) and then delegates
+        to :meth:`bulk_add_edges`; backends implement the bulk form and inherit this
+        single-edge wrapper.
 
         Parameters
         ----------
@@ -220,8 +489,18 @@ class BaseGraph(abc.ABC):
         int
             The ID of the added edge.
         """
+        if validate_keys:
+            self._validate_attributes(attrs, self.edge_attr_keys(), "edge")
 
-    @abc.abstractmethod
+        # Normalise numpy scalar endpoints to native ints (required by the SQL backend).
+        if hasattr(source_id, "item"):
+            source_id = source_id.item()
+        if hasattr(target_id, "item"):
+            target_id = target_id.item()
+
+        edge = {DEFAULT_ATTR_KEYS.EDGE_SOURCE: source_id, DEFAULT_ATTR_KEYS.EDGE_TARGET: target_id, **attrs}
+        return self.bulk_add_edges([edge], return_ids=True)[0]
+
     def remove_edge(
         self,
         source_id: int | None = None,
@@ -234,6 +513,9 @@ class BaseGraph(abc.ABC):
 
         Either provide `edge_id` to remove by edge identifier, or
         provide both `source_id` and `target_id` to remove by endpoints.
+        Endpoint removal is resolved to an edge id via
+        [edge_id][tracksdata.graph.BaseGraph.edge_id]; the deletion itself is
+        delegated to [bulk_remove_edges][tracksdata.graph.BaseGraph.bulk_remove_edges].
 
         Parameters
         ----------
@@ -248,6 +530,31 @@ class BaseGraph(abc.ABC):
         ------
         ValueError
             If the specified edge does not exist or insufficient identifiers are provided.
+        """
+        if edge_id is None:
+            if source_id is None or target_id is None:
+                raise ValueError("Provide either edge_id or both source_id and target_id.")
+            edge_id = self.edge_id(source_id, target_id)
+        self.bulk_remove_edges([edge_id])
+
+    @abc.abstractmethod
+    def bulk_remove_edges(self, edge_ids: Sequence[int]) -> None:
+        """
+        Remove multiple edges from the graph by their edge IDs.
+
+        Existence must be validated up-front so the call either removes every edge
+        in `edge_ids` or raises without modifying the graph. Implementations must
+        accept an empty `edge_ids` as a no-op and normalise array-like inputs to a list.
+
+        Parameters
+        ----------
+        edge_ids : Sequence[int]
+            The IDs of the edges to remove.
+
+        Raises
+        ------
+        ValueError
+            If any edge_id does not exist in the graph.
         """
 
     @overload
@@ -264,6 +571,7 @@ class BaseGraph(abc.ABC):
         return_ids: Literal[True],
     ) -> list[int]: ...
 
+    @abc.abstractmethod
     def bulk_add_edges(
         self,
         edges: list[dict[str, Any]],
@@ -297,28 +605,6 @@ class BaseGraph(abc.ABC):
         list[int] | None
             The IDs of the added edges.
         """
-        # this method benefits the SQLGraph backend
-        if return_ids:
-            edge_ids = []
-            for edge in edges:
-                edge_ids.append(
-                    self.add_edge(
-                        edge.pop(DEFAULT_ATTR_KEYS.EDGE_SOURCE),
-                        edge.pop(DEFAULT_ATTR_KEYS.EDGE_TARGET),
-                        edge,
-                        validate_keys=False,
-                    )
-                )
-            return edge_ids
-
-        # avoiding many ifs and appends
-        for edge in edges:
-            self.add_edge(
-                edge.pop(DEFAULT_ATTR_KEYS.EDGE_SOURCE),
-                edge.pop(DEFAULT_ATTR_KEYS.EDGE_TARGET),
-                edge,
-                validate_keys=False,
-            )
 
     def add_overlap(
         self,
@@ -534,8 +820,8 @@ class BaseGraph(abc.ABC):
     def _validate_subgraph_args(
         self,
         node_ids: Sequence[int] | None = None,
-        node_attr_comps: list[AttrComparison] | None = None,
-        edge_attr_comps: list[AttrComparison] | None = None,
+        node_attr_comps: list[Filter] | None = None,
+        edge_attr_comps: list[Filter] | None = None,
     ) -> None:
         if node_ids is None and not node_attr_comps and not edge_attr_comps:
             raise ValueError("Either node IDs or one of the attributes' comparisons must be provided")
@@ -555,7 +841,7 @@ class BaseGraph(abc.ABC):
     @abc.abstractmethod
     def filter(
         self,
-        *attr_filters: AttrComparison,
+        *attr_filters: Filter,
         node_ids: Sequence[int] | None = None,
         include_targets: bool = False,
         include_sources: bool = False,
@@ -563,10 +849,14 @@ class BaseGraph(abc.ABC):
         """
         Creates a filter object that can be used to create a subgraph or query ids and attributes.
 
+        Multiple positional filters are implicitly AND-ed together. Each filter
+        can itself be a compound `AttrFilter` built from `AttrComparison`s using
+        `&`, `|`, `^`, `~` (e.g. `(NodeAttr("t") == 1) | (NodeAttr("t") == 2)`).
+
         Parameters
         ----------
-        *attr_filters : AttrComparison
-            The attributes to filter the nodes by.
+        *attr_filters : Filter
+            The attribute filters to apply. Positional args are AND-ed.
         node_ids : Sequence[int] | None
             The IDs of the nodes to include in the filter.
             If None, all nodes are used.
@@ -939,6 +1229,7 @@ class BaseGraph(abc.ABC):
         shape: tuple[int, ...] | None = None,
         tracklet_id_key: str = DEFAULT_ATTR_KEYS.TRACKLET_ID,
         overwrite: bool = False,
+        dtype: DTypeLike | None = None,
     ) -> None:
         """
         Save the graph to a CTC ground truth directory.
@@ -954,6 +1245,8 @@ class BaseGraph(abc.ABC):
             The attribute key to use for the track IDs.
         overwrite : bool
             Whether to overwrite the output directory if it exists.
+        dtype : None | DTypeLike
+            Dtype to save segmentation images.
 
         Examples
         --------
@@ -977,6 +1270,7 @@ class BaseGraph(abc.ABC):
             output_dir=output_dir,
             tracklet_id_key=tracklet_id_key,
             overwrite=overwrite,
+            dtype=dtype,
         )
 
     @classmethod
@@ -1044,6 +1338,12 @@ class BaseGraph(abc.ABC):
     def out_degree(self, node_ids: list[int] | int | None = None) -> list[int] | int:
         """
         Get the out-degree of a list of nodes.
+        """
+
+    @abc.abstractmethod
+    def dividing_nodes(self) -> list[int]:
+        """
+        Get the node ids of dividing nodes.
         """
 
     def match(
@@ -1186,7 +1486,8 @@ class BaseGraph(abc.ABC):
         node_attrs = node_attrs.drop(DEFAULT_ATTR_KEYS.NODE_ID)
 
         graph = cls(**kwargs)
-        graph.update_metadata(**other.metadata())
+        graph.metadata.update(other.metadata)
+        graph._private_metadata.update(other._private_metadata_for_copy())
 
         current_node_attr_schemas = graph._node_attr_schemas()
         for k, v in other._node_attr_schemas().items():
@@ -1216,7 +1517,6 @@ class BaseGraph(abc.ABC):
         current_edge_attr_schemas = graph._edge_attr_schemas()
         for k, v in other._edge_attr_schemas().items():
             if k not in current_edge_attr_schemas:
-                print(f"Adding edge attribute key: {k} with dtype: {v.dtype} and default value: {v.default_value}")
                 graph.add_edge_attr_key(k, v.dtype, v.default_value)
 
         edge_attrs = edge_attrs.with_columns(
@@ -1742,6 +2042,14 @@ class BaseGraph(abc.ABC):
             It automatically generates the metadata with:
             - axes: time (t) and spatial axes ((z), y, x)
             - tracklet node property: tracklet_id
+            The graph metadata (`graph.metadata`) is always written to
+            `geff_metadata.extra["tracksdata"]`, including when the metadata is provided
+            by the caller. On key collisions the caller's value wins, so an explicit
+            `extra["tracksdata"]` entry still overrides the graph's metadata.
+            The caller's object is not modified.
+            `shape` is the canonical key for the shape of the dense segmentation, it is
+            read back by `GraphArrayView` and `to_ctc`. Use
+            `tracksdata.io.read_graph_metadata` to read it back without building a graph.
         overwrite : bool
             Whether to overwrite the geff data directory if it exists.
         zarr_format : Literal[2, 3]
@@ -1756,6 +2064,10 @@ class BaseGraph(abc.ABC):
         edge_attrs = self.edge_attrs().drop(DEFAULT_ATTR_KEYS.EDGE_ID)
         edge_ids = edge_attrs.select(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET).to_numpy()
         edge_attrs = edge_attrs.drop(DEFAULT_ATTR_KEYS.EDGE_SOURCE, DEFAULT_ATTR_KEYS.EDGE_TARGET)
+
+        td_metadata = self.metadata.copy()
+        td_metadata.update(self._private_metadata_for_copy())
+        td_metadata.pop("geff", None)  # avoid geff being written multiple times
 
         if geff_metadata is None:
             axes = [Axis(name=DEFAULT_ATTR_KEYS.T, type="time")]
@@ -1780,7 +2092,7 @@ class BaseGraph(abc.ABC):
                     dtype=(
                         polars_dtype_to_numpy_dtype(v.dtype, compatibility=True)
                         if k != DEFAULT_ATTR_KEYS.MASK
-                        else np.uint64
+                        else np.bool_
                     ),
                     varlength=k == DEFAULT_ATTR_KEYS.MASK,
                 )
@@ -1790,9 +2102,6 @@ class BaseGraph(abc.ABC):
                 k: PropMetadata(identifier=k, dtype=polars_dtype_to_numpy_dtype(v.dtype, compatibility=True))
                 for k, v in edge_attrs.to_dict().items()
             }
-
-            td_metadata = self.metadata().copy()
-            td_metadata.pop("geff", None)  # avoid geff being written multiple times
 
             geff_metadata = geff.GeffMetadata(
                 directed=True,
@@ -1804,6 +2113,15 @@ class BaseGraph(abc.ABC):
                     "tracksdata": td_metadata,
                 },
             )
+        else:
+            # copy so the caller's metadata object is left untouched
+            geff_metadata = geff_metadata.model_copy(deep=True)
+            extra = dict(geff_metadata.extra)
+            # caller-provided entries win, so they can still override the graph's metadata
+            merged = {**td_metadata, **extra.get("tracksdata", {})}
+            merged.pop("geff", None)  # avoid geff being written multiple times
+            extra["tracksdata"] = merged
+            geff_metadata.extra = extra
 
         node_dict = {
             k: {"values": column_to_numpy(v), "missing": None}
@@ -1813,7 +2131,7 @@ class BaseGraph(abc.ABC):
 
         if DEFAULT_ATTR_KEYS.MASK in node_attrs.columns:
             node_dict[DEFAULT_ATTR_KEYS.MASK] = construct_var_len_props(
-                [mask.mask.astype(np.uint64) for mask in node_attrs[DEFAULT_ATTR_KEYS.MASK]]
+                [mask.mask.astype(bool) for mask in node_attrs[DEFAULT_ATTR_KEYS.MASK]]
             )
 
         edge_dict = {k: {"values": column_to_numpy(v), "missing": None} for k, v in edge_attrs.to_dict().items()}
@@ -1829,60 +2147,96 @@ class BaseGraph(abc.ABC):
             zarr_format=zarr_format,
         )
 
-    @abc.abstractmethod
-    def metadata(self) -> dict[str, Any]:
+    @property
+    def metadata(self) -> MetadataView:
         """
         Return the metadata of the graph.
 
         Returns
         -------
-        dict[str, Any]
+        MetadataView
             The metadata of the graph as a dictionary.
 
         Examples
         --------
         ```python
-        metadata = graph.metadata()
+        metadata = graph.metadata
         print(metadata["shape"])
         ```
         """
+        return MetadataView(
+            graph=self,
+            data={k: v for k, v in self._metadata().items() if not self._is_private_metadata_key(k)},
+            is_public=True,
+        )
+
+    @property
+    def _private_metadata(self) -> MetadataView:
+        return MetadataView(
+            graph=self,
+            data={k: v for k, v in self._metadata().items() if self._is_private_metadata_key(k)},
+            is_public=False,
+        )
+
+    @classmethod
+    def _is_private_metadata_key(cls, key: str) -> bool:
+        return key.startswith(cls._PRIVATE_METADATA_PREFIX)
+
+    @classmethod
+    def _validate_metadata_key(cls, key: str, *, is_public: bool) -> None:
+        if not isinstance(key, str):
+            raise TypeError(f"Metadata key must be a string. Got {type(key)}.")
+        is_private_key = cls._is_private_metadata_key(key)
+        if is_public and is_private_key:
+            raise ValueError(f"Metadata key '{key}' is reserved for internal use.")
+        if not is_public and not is_private_key:
+            raise ValueError(
+                f"Metadata key '{key}' is not private. Private metadata keys must start with "
+                f"'{cls._PRIVATE_METADATA_PREFIX}'."
+            )
+
+    @classmethod
+    def _validate_metadata_keys(cls, keys: Sequence[str], *, is_public: bool) -> None:
+        for key in keys:
+            cls._validate_metadata_key(key, is_public=is_public)
+
+    def _set_metadata_with_validation(self, is_public: bool = True, **kwargs) -> None:
+        self._validate_metadata_keys(kwargs.keys(), is_public=is_public)
+        self._update_metadata(**kwargs)
+
+    def _remove_metadata_with_validation(self, key: str, *, is_public: bool = True) -> None:
+        self._validate_metadata_key(key, is_public=is_public)
+        self._remove_metadata(key)
+
+    def _private_metadata_for_copy(self) -> dict[str, Any]:
+        """
+        Return private metadata entries that should be propagated by `from_other`.
+
+        Backends can override this to exclude backend-specific private metadata.
+        """
+        return dict(self._private_metadata)
 
     @abc.abstractmethod
-    def update_metadata(self, **kwargs) -> None:
+    def _metadata(self) -> dict[str, Any]:
         """
-        Set or update metadata for the graph.
-
-        Parameters
-        ----------
-        **kwargs : Any
-            The metadata items to set by key. Values will be stored as JSON.
-
-        Examples
-        --------
-        ```python
-        graph.update_metadata(shape=[1, 25, 25], path="path/to/image.ome.zarr")
-        graph.update_metadata(description="Tracking data from experiment 1")
-        ```
+        Return the full metadata including private keys.
         """
 
     @abc.abstractmethod
-    def remove_metadata(self, key: str) -> None:
+    def _update_metadata(self, **kwargs) -> None:
         """
-        Remove a metadata key from the graph.
-
-        Parameters
-        ----------
-        key : str
-            The key of the metadata to remove.
-
-        Examples
-        --------
-        ```python
-        graph.remove_metadata("shape")
-        ```
+        Backend-specific metadata update implementation without public key validation.
         """
 
-    def to_traccuracy_graph(self, array_view_kwargs: dict[str, Any] | None = None) -> "TrackingGraph":
+    @abc.abstractmethod
+    def _remove_metadata(self, key: str) -> None:
+        """
+        Backend-specific metadata removal implementation without public key validation.
+        """
+
+    def to_traccuracy_graph(
+        self, array_view_kwargs: dict[str, Any] | None = None, location_keys: list[str] | None = None
+    ) -> "TrackingGraph":
         """
         Convert the graph to a `traccuracy.TrackingGraph`.
 
@@ -1890,6 +2244,10 @@ class BaseGraph(abc.ABC):
         ----------
         array_view_kwargs : dict[str, Any] | None
             Additional keyword arguments to pass to the `GraphArrayView` constructor used to create the segmentation.
+        location_keys : list[str] | None
+            The keys of the location attributes to use for the segmentation.
+            If None, the location keys are inferred from the intersection of the graph node attributes and
+            the list [DEFAULT_ATTR_KEYS.Z, DEFAULT_ATTR_KEYS.Y, DEFAULT_ATTR_KEYS.X].
 
         Returns
         -------
@@ -1898,7 +2256,40 @@ class BaseGraph(abc.ABC):
         """
         from tracksdata.metrics._traccuracy import to_traccuracy_graph
 
-        return to_traccuracy_graph(self, array_view_kwargs=array_view_kwargs)
+        return to_traccuracy_graph(self, array_view_kwargs=array_view_kwargs, location_keys=location_keys)
+
+    def to_motile_graph(
+        self,
+        *,
+        node_attr_keys: Sequence[str] | None = None,
+        edge_attr_keys: Sequence[str] | None = None,
+        frame_attribute: str = DEFAULT_ATTR_KEYS.T,
+    ) -> "motile.TrackGraph":
+        """
+        Convert the graph to a [`motile.TrackGraph`](https://funkelab.github.io/motile/).
+
+        Parameters
+        ----------
+        node_attr_keys : Sequence[str] | None
+            Node attribute keys to copy. If None, all node attributes are copied.
+        edge_attr_keys : Sequence[str] | None
+            Edge attribute keys to copy. If None, all edge attributes are copied.
+        frame_attribute : str
+            Node attribute used as the time/frame dimension. Defaults to ``"t"``.
+
+        Returns
+        -------
+        motile.TrackGraph
+            A `motile` track graph.
+        """
+        from tracksdata.functional._motile import to_motile_graph
+
+        return to_motile_graph(
+            self,
+            node_attr_keys=node_attr_keys,
+            edge_attr_keys=edge_attr_keys,
+            frame_attribute=frame_attribute,
+        )
 
     @abc.abstractmethod
     def has_node(self, node_id: int) -> bool:
@@ -2073,7 +2464,7 @@ class NodeInterface:
         return self._graph.filter(node_ids=[self._node_id]).node_attrs(attr_keys=[key])[key].item()
 
     def __setitem__(self, key: str, value: Any) -> None:
-        return self._graph.update_node_attrs(attrs={key: value}, node_ids=[self._node_id])
+        return self._graph.update_node_attrs(attrs={key: [value]}, node_ids=[self._node_id])
 
     def __str__(self) -> str:
         node_attr = self._graph.filter(node_ids=[self._node_id]).node_attrs()
@@ -2147,7 +2538,7 @@ class EdgeInterface:
         value : Any
             The value to set.
         """
-        return self._graph.update_edge_attrs(attrs={key: value}, edge_ids=[self._edge_id])
+        return self._graph.update_edge_attrs(attrs={key: [value]}, edge_ids=[self._edge_id])
 
     def __str__(self) -> str:
         df = self._graph.edge_attrs()

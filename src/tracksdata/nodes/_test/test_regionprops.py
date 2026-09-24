@@ -79,8 +79,8 @@ def test_regionprops_add_nodes_2d() -> None:
     operator = RegionPropsNodes(extra_properties=extra_properties)
     operator.add_nodes(graph, labels=labels)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that nodes were added
     assert graph.num_nodes() == 2  # Two regions (labels 1 and 2)
@@ -102,6 +102,44 @@ def test_regionprops_add_nodes_2d() -> None:
     assert areas == [3, 3]
 
 
+def test_regionprops_add_nodes_sets_scale_from_spacing() -> None:
+    """`scale` metadata is set from `spacing` when provided, and left alone otherwise."""
+    labels = np.array([[[1, 1, 0], [1, 0, 2], [0, 2, 2]]], dtype=np.int32)
+
+    graph = RustWorkXGraph()
+    RegionPropsNodes(spacing=(0.5, 0.1)).add_nodes(graph, labels=labels)
+    assert graph.metadata["scale"] == (0.5, 0.1)
+
+    graph_no_spacing = RustWorkXGraph()
+    RegionPropsNodes().add_nodes(graph_no_spacing, labels=labels)
+    assert "scale" not in graph_no_spacing.metadata
+
+
+def test_regionprops_add_nodes_matching_existing_scale_is_a_noop() -> None:
+    """An existing `scale` metadata entry that matches `spacing` is left as-is."""
+    labels = np.array([[[1, 1, 0], [1, 0, 2], [0, 2, 2]]], dtype=np.int32)
+
+    graph = RustWorkXGraph()
+    graph.metadata["scale"] = (0.5, 0.1)
+    RegionPropsNodes(spacing=(0.5, 0.1)).add_nodes(graph, labels=labels)
+    assert graph.metadata["scale"] == (0.5, 0.1)
+
+
+def test_regionprops_add_nodes_raises_on_scale_mismatch() -> None:
+    """A `spacing` that disagrees with the graph's existing `scale` metadata is an error.
+
+    Region properties like `perimeter` are computed using `spacing`, so silently
+    keeping the graph's `scale` would leave it describing a different resolution
+    than the one actually used.
+    """
+    labels = np.array([[[1, 1, 0], [1, 0, 2], [0, 2, 2]]], dtype=np.int32)
+
+    graph = RustWorkXGraph()
+    graph.metadata["scale"] = (1.0, 1.0)
+    with pytest.raises(ValueError, match="does not match"):
+        RegionPropsNodes(spacing=(0.5, 0.1)).add_nodes(graph, labels=labels)
+
+
 def test_regionprops_add_nodes_3d() -> None:
     """Test adding nodes from 3D labels."""
     graph = RustWorkXGraph()
@@ -115,8 +153,8 @@ def test_regionprops_add_nodes_3d() -> None:
     operator = RegionPropsNodes(extra_properties=extra_properties)
     operator.add_nodes(graph, labels=labels)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that nodes were added
     assert graph.num_nodes() == 2  # Two regions
@@ -150,8 +188,8 @@ def test_regionprops_add_nodes_with_intensity() -> None:
 
     operator.add_nodes(graph, labels=labels, intensity_image=intensity)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that nodes were added with intensity attributes
     nodes_df = graph.node_attrs()
@@ -181,8 +219,8 @@ def test_regionprops_add_nodes_timelapse(n_workers: int) -> None:
     with options_context(n_workers=n_workers):
         operator.add_nodes(graph, labels=labels)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that nodes were added for both time points
     nodes_df = graph.node_attrs()
@@ -209,8 +247,8 @@ def test_regionprops_add_nodes_timelapse_with_intensity() -> None:
 
     operator.add_nodes(graph, labels=labels, intensity_image=intensity)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that nodes were added with intensity attributes
     nodes_df = graph.node_attrs()
@@ -237,8 +275,8 @@ def test_regionprops_custom_properties() -> None:
 
     operator.add_nodes(graph, labels=labels, t=0)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that custom property was calculated
     nodes_df = graph.node_attrs()
@@ -275,8 +313,8 @@ def test_regionprops_mask_creation() -> None:
 
     operator.add_nodes(graph, labels=labels, t=0)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that masks were created
     nodes_df = graph.node_attrs()
@@ -300,8 +338,8 @@ def test_regionprops_spacing() -> None:
 
     operator.add_nodes(graph, labels=labels, t=0)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # Check that nodes were added (spacing affects internal calculations)
     nodes_df = graph.node_attrs()
@@ -323,8 +361,8 @@ def test_regionprops_empty_labels() -> None:
 
     operator.add_nodes(graph, labels=labels, t=0)
 
-    assert "shape" in graph.metadata()
-    assert graph.metadata()["shape"] == labels.shape
+    assert "shape" in graph.metadata
+    assert graph.metadata["shape"] == labels.shape
 
     # No nodes should be added
     assert graph.num_nodes() == 0

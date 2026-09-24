@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
-    from tracksdata.graph._graph_view import GraphView
+    from tracksdata.graph._graph_view import GraphView, ViewMode
 
 
 class BaseFilter(abc.ABC):
@@ -49,7 +49,26 @@ class BaseFilter(abc.ABC):
         self,
         node_attr_keys: list[str] | None = None,
         edge_attr_keys: list[str] | None = None,
+        *,
+        mode: "ViewMode | None" = None,
     ) -> "GraphView":
         """
         Get a subgraph of the graph resulting from the filter.
+
+        mode : ViewMode | None
+            How the resulting view relates to its root graph (write-through
+            only, or live-updating). Defaults to ``ViewMode.WRITE_THROUGH``
+            when None.
+        """
+
+    @abc.abstractmethod
+    def num_edges(self) -> int:
+        """
+        The number of edges selected by the filter
+        """
+
+    @abc.abstractmethod
+    def num_nodes(self) -> int:
+        """
+        The number of nodes selected by the filter
         """
