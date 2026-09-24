@@ -314,6 +314,47 @@ def test_graph_class_parameter(graph_class_and_kwargs: tuple[type[BaseGraph], di
     assert graph.num_nodes() == 9
 
 
+def test_reuse_loader_with_different_filters() -> None:
+    """Test reusing a loader instance with different filters across multiple loads."""
+    store = MemoryStore()
+    _create_test_geff(store)
+
+    loader = FilteredGeffLoader(store)
+
+    # First load: t in [0, 3)
+    loader.node_filters = [NodeAttr("t") >= 0, NodeAttr("t") < 3]
+    graph1, _ = loader.load(node_props=["t", "x"])
+    times1 = set(graph1.node_attrs(attr_keys=["t"])["t"].to_list())
+    assert times1 == {0, 1, 2}
+    assert graph1.num_nodes() == 9
+
+    # Second load: t in [5, 8)
+    loader.node_filters = [NodeAttr("t") >= 5, NodeAttr("t") < 8]
+    graph2, _ = loader.load(node_props=["t", "x"])
+    times2 = set(graph2.node_attrs(attr_keys=["t"])["t"].to_list())
+    assert times2 == {5, 6, 7}
+    assert graph2.num_nodes() == 9
+
+    # Third load: different props
+    loader.node_filters = [NodeAttr("t") == 4]
+    graph3, _ = loader.load(node_props=["t", "y", "label"])
+    assert graph3.num_nodes() == 3
+    assert "y" in set(graph3.node_attr_keys())
+    assert "label" in set(graph3.node_attr_keys())
+
+    # Fourth load: no filters
+    loader.node_filters = []
+    graph4, _ = loader.load(node_props=["t"])
+    assert graph4.num_nodes() == 30
+
+    # Fifth load: with edge_props subset
+    loader.node_filters = [NodeAttr("t") >= 3, NodeAttr("t") < 6]
+    graph5, _ = loader.load(node_props=["t"], edge_props=["distance"])
+    assert graph5.num_edges() == 6
+    edge_keys = set(graph5.edge_attr_keys())
+    assert "distance" in edge_keys
+
+
 def test_edges_filtered_by_nodes() -> None:
     """Test that edges are filtered when both endpoints are in node set."""
     store = MemoryStore()
